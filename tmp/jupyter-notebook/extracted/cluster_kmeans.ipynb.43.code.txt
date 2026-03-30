@@ -1,0 +1,133 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell T4 — Optional Parent Internal Structure Difference
+# ══════════════════════════════════════════════════════════════════════════════
+def cosine_distance_safe(p, q):
+    """计算两个分布向量的 cosine distance。"""
+    p = np.asarray(p, dtype=float)
+    q = np.asarray(q, dtype=float)
+    denom = np.linalg.norm(p) * np.linalg.norm(q)
+    if denom == 0:
+        return 0.0
+    return float(1.0 - np.dot(p, q) / denom)
+
+
+def analyze_parent_internal_structure(
+    df_in,
+    parent_col,
+    child_col,
+    parent_name_map,
+    start_year=1990,
+):
+    """比较粗层级父主题内部 flat 子主题在 CN / US 之间的技术路线差异。"""
+    tmp = df_in[(df_in["year_int"] >= start_year) & (df_in["country2"].isin(["CN", "US"]))].copy()
+    parent_totals = (
+        tmp.groupby([parent_col, "country2"])
+        .size()
+        .unstack(fill_value=0)
+        .rename_axis("parent_topic")
+        .reset_index()
+    )
+    for c in ["CN", "US"]:
+        if c not in parent_totals.columns:
+            parent_totals[c] = 0
+    parent_totals["parent_share_CN"] = parent_totals["CN"] / max(parent_totals["CN"].sum(), 1)
+    parent_totals["parent_share_US"] = parent_totals["US"] / max(parent_totals["US"].sum(), 1)
+    parent_totals["parent_delta"] = parent_totals["parent_share_CN"] - parent_totals["parent_share_US"]
+    parent_totals["parent_abs_delta"] = parent_totals["parent_delta"].abs()
+
+    rows = []
+    for parent_topic, grp in tmp.groupby(parent_col):
+        child_table = grp.groupby(["country2", child_col]).size().unstack(fill_value=0)
+        for country in ["CN", "US"]:
+            if country not in child_table.index:
+                child_table.loc[country] = 0
+        child_table = child_table.sort_index(axis=1)
+
+        cn_counts = child_table.loc["CN"].astype(float).values
+        us_counts = child_table.loc["US"].astype(float).values
+        if cn_counts.sum() == 0 and us_counts.sum() == 0:
+            continue
+
+        p = cn_counts / cn_counts.sum() if cn_counts.sum() > 0 else np.zeros_like(cn_counts)
+        q = us_counts / us_counts.sum() if us_counts.sum() > 0 else np.zeros_like(us_counts)
+        js_div = float(jensenshannon(p + 1e-12, q + 1e-12, base=2.0) ** 2)
+        l1_dist = float(np.abs(p - q).sum())
+        cos_dist = cosine_distance_safe(p, q)
+
+        child_gap = np.abs(p - q)
+        top_child_gap_mean = float(np.sort(child_gap)[::-1][: min(3, len(child_gap))].mean()) if len(child_gap) else np.nan
+
+        rows.append({
+            "parent_topic": int(parent_topic),
+            "parent_name": parent_name_map.get(int(parent_topic), f"topic_{int(parent_topic)}"),
+            "n_child_topics": int((child_table.sum(axis=0) > 0).sum()),
+            "js_divergence": js_div,
+            "l1_distance": l1_dist,
+            "cosine_distance": cos_dist,
+            "top3_child_gap_mean": top_child_gap_mean,
+        })
+
+    out = pd.DataFrame(rows)
+    out = out.merge(parent_totals, how="left", left_on="parent_topic", right_on="parent_topic")
+    out = out.sort_values(["js_divergence", "parent_abs_delta"], ascending=[False, False]).reset_index(drop=True)
+    return out
+
+
+def plot_parent_structure_scatter(parent_structure_df, parent_level, out_path):
+    """绘制父主题总份额差距 vs 内部结构差异散点图。"""
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.scatter(
+        parent_structure_df["parent_abs_delta"],
+        parent_structure_df["js_divergence"],
+        s=80,
+        alpha=0.82,
+        color="#E03C31",
+        edgecolor="white",
+        linewidth=0.8,
+    )
+
+    to_annotate = parent_structure_df.head(min(12, len(parent_structure_df)))
+    for row in to_annotate.itertuples(index=False):
+        ax.text(
+            row.parent_abs_delta,
+            row.js_divergence,
+            f"T{row.parent_topic}:{str(row.parent_name)[:18]}",
+            fontsize=8,
+            ha="left",
+            va="bottom",
+        )
+
+    ax.set_xlabel("Parent |Δ share| (CN − US)")
+    ax.set_ylabel("Internal JS divergence")
+    ax.set_title(f"{parent_level} Parent Gap vs Internal Route Difference")
+    ax.grid(True, alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+    print(f"✅ 已保存父主题内部结构差异图: {out_path}")
+
+
+parent_level = next((lvl for lvl in ["L4", "L3", "L2"] if lvl in gap_results_by_level), None)
+if parent_level is None:
+    print("⚠️ 可用粗层级不足，跳过父主题内部结构差异分析")
+else:
+    parent_structure_df = analyze_parent_internal_structure(
+        df_in=te_df,
+        parent_col=f"topic_{parent_level}",
+        child_col="topic_L0",
+        parent_name_map=hier_topic_name_maps[parent_level],
+        start_year=GAP_START_YEAR,
+    )
+    parent_structure_df.to_csv(TIME_DIR / f"parent_internal_structure_{parent_level}.csv", index=False)
+
+    parent_structure_fig_path = FIGS_DIR / f"parent_internal_structure_{parent_level}.png"
+    plot_parent_structure_scatter(
+        parent_structure_df=parent_structure_df,
+        parent_level=parent_level,
+        out_path=parent_structure_fig_path,
+    )
+
+    print()
+    print("✅ 父主题内部结构差异 summary")
+    print(parent_structure_df.head(20))

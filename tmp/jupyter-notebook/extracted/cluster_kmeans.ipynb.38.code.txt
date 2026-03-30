@@ -1,0 +1,103 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell H3 — Build Hierarchical Topics / Dendrogram / Level Maps
+# ══════════════════════════════════════════════════════════════════════════════
+topic_docs_df_ref = _resolve_required_object("topic_docs_df")
+X_counts_ref = _resolve_required_object("X_counts")
+c_tf_idf_matrix_ref = _resolve_required_object("c_tf_idf_matrix")
+words_ref = _resolve_required_object("words")
+
+topic_name_map_base = dict(_resolve_required_object("topic_name_map", fallback_names=["topic_name_map_L0"]))
+if len(topic_name_map_base) == 0 and "topic_info_df" in globals():
+    topic_name_map_base = dict(zip(topic_info_df["topic"], topic_info_df["name"]))
+
+hierarchy_bundle = build_hierarchical_topic_tree(
+    topic_docs_df=topic_docs_df_ref,
+    X_counts=X_counts_ref,
+    c_tf_idf_matrix=c_tf_idf_matrix_ref,
+    words=words_ref,
+    base_topic_name_map=topic_name_map_base,
+    distance=HIER_DISTANCE,
+    linkage_method=HIER_LINKAGE_METHOD,
+    top_words=HIER_TOP_WORDS,
+    label_words=HIER_LABEL_WORDS,
+)
+
+hier_linkage_matrix = hierarchy_bundle["linkage_matrix"]
+hier_node_info_df = hierarchy_bundle["node_info_df"]
+hier_leaf_topic_ids = hierarchy_bundle["leaf_topic_ids"]
+hier_leafset_to_node_id = hierarchy_bundle["leafset_to_node_id"]
+hier_linkage_metric_used = hierarchy_bundle["linkage_metric_used"]
+
+hier_level_counts = _resolve_level_cluster_counts(
+    n_topics=len(hier_leaf_topic_ids),
+    target_counts=HIER_LEVEL_TARGETS,
+    max_levels=5,
+)
+
+hier_level_maps = {"L0": {int(t): int(t) for t in hier_leaf_topic_ids}}
+hier_topic_name_maps = {"L0": dict(topic_name_map_base)}
+hier_level_topic_info = {
+    "L0": topic_info_df.copy() if "topic_info_df" in globals() else pd.DataFrame({
+        "topic": hier_leaf_topic_ids,
+        "name": [topic_name_map_base.get(int(t), f"topic_{int(t)}") for t in hier_leaf_topic_ids],
+    })
+}
+
+if "topic_L0" not in df.columns:
+    df["topic_L0"] = df["topic"].astype(int)
+
+globals()["topic_name_map_L0"] = hier_topic_name_maps["L0"]
+
+level_records = [{
+    "level": "L0",
+    "topic_col": "topic_L0",
+    "n_clusters": len(hier_topic_name_maps["L0"]),
+}]
+
+for level_idx, n_clusters in enumerate(hier_level_counts[1:], start=1):
+    level_name = f"L{level_idx}"
+    topic_to_cluster, level_topic_info_df, level_topic_name_map = build_hierarchy_level(
+        topic_docs_df=topic_docs_df_ref,
+        X_counts=X_counts_ref,
+        words=words_ref,
+        linkage_matrix=hier_linkage_matrix,
+        leafset_to_node_id=hier_leafset_to_node_id,
+        n_clusters=n_clusters,
+        top_words=HIER_TOP_WORDS,
+        label_words=HIER_LABEL_WORDS,
+    )
+
+    hier_level_maps[level_name] = topic_to_cluster
+    hier_topic_name_maps[level_name] = level_topic_name_map
+    hier_level_topic_info[level_name] = level_topic_info_df
+    df[f"topic_{level_name}"] = df["topic"].map(topic_to_cluster).astype(int)
+    globals()[f"topic_name_map_{level_name}"] = level_topic_name_map
+
+    level_records.append({
+        "level": level_name,
+        "topic_col": f"topic_{level_name}",
+        "n_clusters": int(level_topic_info_df["topic"].nunique()),
+    })
+
+hier_level_specs = pd.DataFrame(level_records)
+
+hierarchy_fig_path = HIER_DIR / f"topic_hierarchy_dendrogram_{HIER_LINKAGE_METHOD}_{HIER_DISTANCE}.png"
+dendro_data = plot_hierarchical_dendrogram(
+    linkage_matrix=hier_linkage_matrix,
+    leaf_topic_ids=hier_leaf_topic_ids,
+    leaf_name_map=hier_topic_name_maps["L0"],
+    node_info_df=hier_node_info_df,
+    out_path=hierarchy_fig_path,
+    linkage_method=HIER_LINKAGE_METHOD,
+    linkage_metric=hier_linkage_metric_used,
+    color_threshold=HIER_COLOR_THRESHOLD,
+)
+
+hier_node_info_df.to_csv(HIER_DIR / "hier_node_info.csv", index=False)
+hier_level_specs.to_csv(HIER_DIR / "hier_level_specs.csv", index=False)
+for level_name, info_df in hier_level_topic_info.items():
+    info_df.to_csv(HIER_DIR / f"hier_topic_info_{level_name}.csv", index=False)
+
+print("✅ hierarchical topics 已构建完成")
+print(hier_level_specs)
+print(f"✅ 节点信息: {HIER_DIR / 'hier_node_info.csv'}")

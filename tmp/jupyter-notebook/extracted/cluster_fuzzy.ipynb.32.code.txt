@@ -1,0 +1,12 @@
+c_tf_idf_matrix_anchor = compute_c_tf_idf(X_counts_anchor)
+weighted_c_tf_idf_matrix = compute_c_tf_idf(topic_word_weight_matrix)
+
+# notebook 的默认主版本改成 fuzzy weighted。
+c_tf_idf_matrix = weighted_c_tf_idf_matrix
+X_counts = X_counts_fuzzy
+
+save_npz(fuzzy_output_dir / "topic_term_matrix_anchor.npz", X_counts_anchor)
+save_npz(fuzzy_output_dir / "topic_term_matrix_fuzzy_weighted.npz", topic_word_weight_matrix)
+
+print("Anchor c-TF-IDF matrix shape:", c_tf_idf_matrix_anchor.shape)
+print("Fuzzy weighted c-TF-IDF matrix shape:", weighted_c_tf_idf_matrix.shape)

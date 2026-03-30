@@ -1,0 +1,774 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell T1 — Generic CN/US Gap Helpers for Multi-Level Topics
+# ══════════════════════════════════════════════════════════════════════════════
+def prepare_gap_base_df(df_in, topic_cols, year_col="year"):
+    """标准化国家列与年份列，并保留后续多层级分析所需字段。"""
+    base_df = df_in.copy()
+
+    if "country2" not in base_df.columns:
+        if "country_code" in base_df.columns:
+            base_df["country2"] = base_df["country_code"].map(
+                lambda x: "CN" if str(x).upper() in {"CN", "CHN", "CHINA"} else
+                ("US" if str(x).upper() in {"US", "USA", "UNITED STATES"} else "OTHER")
+            )
+        elif "country" in base_df.columns:
+            def _map_country(x):
+                s = str(x).upper()
+                if ("CHINA" in s) or (s in {"CN", "CHN"}):
+                    return "CN"
+                if ("UNITED STATES" in s) or (s in {"US", "USA"}):
+                    return "US"
+                return "OTHER"
+            base_df["country2"] = base_df["country"].map(_map_country)
+        else:
+            raise RuntimeError("没有找到国家列（country / country_code）。")
+
+    base_df["year_int"] = pd.to_numeric(base_df[year_col], errors="coerce")
+    required_cols = ["country2", "year_int"] + list(topic_cols)
+    base_df = base_df.dropna(subset=required_cols).copy()
+    base_df["year_int"] = base_df["year_int"].astype(int)
+
+    for col in topic_cols:
+        base_df[col] = pd.to_numeric(base_df[col], errors="coerce")
+        base_df = base_df.dropna(subset=[col]).copy()
+        base_df[col] = base_df[col].astype(int)
+
+    base_df = base_df[base_df["country2"].isin(["CN", "US"])].copy()
+    base_df = base_df[(base_df["year_int"] >= 1900) & (base_df["year_int"] <= 2100)].copy()
+    return base_df.reset_index(drop=True)
+
+
+def topic_label(tid, topic_name_map, max_len=36):
+    """统一生成 topic label。"""
+    name = str(topic_name_map.get(int(tid), "")).strip()
+    if name == "" or name == "nan":
+        return f"T{int(tid)}"
+    return f"T{int(tid)}: {name[:max_len]}"
+
+
+def build_topic_time_series(df_in, topic_col="topic", year_col="year_int", country_col="country2"):
+    """构建 annual share gap panel。"""
+    tmp = df_in[[topic_col, year_col, country_col]].copy()
+    tmp = tmp[tmp[country_col].isin(["CN", "US"])].dropna().copy()
+    tmp[topic_col] = tmp[topic_col].astype(int)
+    tmp[year_col] = tmp[year_col].astype(int)
+
+    counts = (
+        tmp.groupby([topic_col, year_col, country_col])
+        .size()
+        .reset_index(name="n")
+    )
+
+    wide = counts.pivot_table(
+        index=[topic_col, year_col],
+        columns=country_col,
+        values="n",
+        fill_value=0,
+    ).reset_index()
+
+    all_topics = sorted(tmp[topic_col].unique())
+    all_years = sorted(tmp[year_col].unique())
+    full_idx = pd.MultiIndex.from_product([all_topics, all_years], names=[topic_col, year_col])
+    wide = (
+        wide.set_index([topic_col, year_col])
+        .reindex(full_idx, fill_value=0)
+        .reset_index()
+        .sort_values([topic_col, year_col])
+    )
+
+    for c in ["CN", "US"]:
+        if c not in wide.columns:
+            wide[c] = 0
+
+    year_totals = (
+        tmp.groupby([year_col, country_col])
+        .size()
+        .unstack(fill_value=0)
+        .reindex(all_years, fill_value=0)
+    )
+    for c in ["CN", "US"]:
+        if c not in year_totals.columns:
+            year_totals[c] = 0
+
+    wide["share_CN"] = wide["CN"] / wide[year_col].map(year_totals["CN"].to_dict()).replace(0, np.nan)
+    wide["share_US"] = wide["US"] / wide[year_col].map(year_totals["US"].to_dict()).replace(0, np.nan)
+    wide["share_CN"] = wide["share_CN"].fillna(0.0)
+    wide["share_US"] = wide["share_US"].fillna(0.0)
+
+    result = wide[[topic_col, year_col, "CN", "US", "share_CN", "share_US"]].copy()
+    result.columns = ["topic", "year", "count_CN", "count_US", "share_CN", "share_US"]
+    result["delta"] = result["share_CN"] - result["share_US"]
+    result["abs_delta"] = result["delta"].abs()
+    return result.sort_values(["topic", "year"]).reset_index(drop=True)
+
+
+def build_windowed_share_gap(
+    df_in,
+    topic_col="topic",
+    year_col="year_int",
+    country_col="country2",
+    window_size=3,
+    min_periods=None,
+):
+    """构建 rolling/window share gap panel。"""
+    if min_periods is None:
+        min_periods = window_size
+
+    tmp = df_in[[topic_col, year_col, country_col]].copy()
+    tmp = tmp[tmp[country_col].isin(["CN", "US"])].dropna().copy()
+    tmp[topic_col] = tmp[topic_col].astype(int)
+    tmp[year_col] = tmp[year_col].astype(int)
+
+    counts = (
+        tmp.groupby([topic_col, year_col, country_col])
+        .size()
+        .reset_index(name="n")
+    )
+
+    wide = counts.pivot_table(
+        index=[topic_col, year_col],
+        columns=country_col,
+        values="n",
+        fill_value=0,
+    ).reset_index()
+
+    for c in ["CN", "US"]:
+        if c not in wide.columns:
+            wide[c] = 0
+
+    all_topics = sorted(tmp[topic_col].unique())
+    all_years = sorted(tmp[year_col].unique())
+    full_idx = pd.MultiIndex.from_product([all_topics, all_years], names=[topic_col, year_col])
+    wide = (
+        wide.set_index([topic_col, year_col])
+        .reindex(full_idx, fill_value=0)
+        .reset_index()
+        .sort_values([topic_col, year_col])
+    )
+
+    for c in ["CN", "US"]:
+        wide[f"roll_{c}"] = (
+            wide.groupby(topic_col)[c]
+            .transform(lambda s: s.rolling(window=window_size, min_periods=min_periods).sum())
+        )
+
+    wide = wide.dropna(subset=["roll_CN", "roll_US"]).copy()
+    for c in ["CN", "US"]:
+        year_total = wide.groupby(year_col)[f"roll_{c}"].transform("sum")
+        wide[f"share_{c}"] = wide[f"roll_{c}"] / year_total.replace(0, np.nan)
+
+    wide["share_CN"] = wide["share_CN"].fillna(0.0)
+    wide["share_US"] = wide["share_US"].fillna(0.0)
+    wide["delta"] = wide["share_CN"] - wide["share_US"]
+    wide["abs_delta"] = wide["delta"].abs()
+
+    result = wide[[topic_col, year_col, "roll_CN", "roll_US", "share_CN", "share_US", "delta", "abs_delta"]].copy()
+    result.columns = ["topic", "year", "window_count_CN", "window_count_US", "share_CN", "share_US", "delta", "abs_delta"]
+    return result.sort_values(["topic", "year"]).reset_index(drop=True)
+
+
+def build_cumulative_gap(panel_df, topic_name_map, start_year=1990):
+    """基于 annual/rolling gap panel 构建 cumulative gap panel。"""
+    tmp = panel_df[panel_df["year"] >= start_year].copy()
+    tmp = tmp.sort_values(["topic", "year"]).reset_index(drop=True)
+
+    all_topics = sorted(tmp["topic"].unique())
+    all_years = sorted(tmp["year"].unique())
+    full_idx = pd.MultiIndex.from_product([all_topics, all_years], names=["topic", "year"])
+    tmp = (
+        tmp.set_index(["topic", "year"])
+        .reindex(full_idx)
+        .reset_index()
+        .sort_values(["topic", "year"])
+    )
+
+    for col in ["share_CN", "share_US", "delta", "abs_delta"]:
+        if col not in tmp.columns:
+            tmp[col] = 0.0
+    tmp["share_CN"] = tmp["share_CN"].fillna(0.0)
+    tmp["share_US"] = tmp["share_US"].fillna(0.0)
+    tmp["delta"] = tmp["delta"].fillna(tmp["share_CN"] - tmp["share_US"])
+    tmp["abs_delta"] = tmp["delta"].abs()
+    tmp["cum_delta"] = tmp.groupby("topic")["delta"].cumsum()
+    tmp["cum_abs_delta"] = tmp["cum_delta"].abs()
+    tmp["topic_name"] = tmp["topic"].map(topic_name_map)
+    return tmp.reset_index(drop=True)
+
+
+def classify_gap_trends(
+    panel_df,
+    topic_name_map,
+    value_col="delta",
+    min_years=6,
+    eps=1e-4,
+    slope_col=None,
+    start_col=None,
+    end_col=None,
+):
+    """对 annual / rolling / cumulative gap 做通用趋势分类。"""
+    slope_col = slope_col or f"slope_{value_col}"
+    start_col = start_col or f"{value_col}_start"
+    end_col = end_col or f"{value_col}_end"
+
+    records = []
+    for tid, grp in panel_df.groupby("topic"):
+        grp = grp.sort_values("year").dropna(subset=[value_col])
+        n_years = len(grp)
+        if n_years < min_years:
+            records.append({
+                "topic": int(tid),
+                slope_col: np.nan,
+                start_col: np.nan,
+                end_col: np.nan,
+                "cross_year": np.nan,
+                "trend_label": "insufficient",
+                "n_years": n_years,
+            })
+            continue
+
+        years = grp["year"].values.reshape(-1, 1).astype(float)
+        vals = grp[value_col].values.astype(float)
+        try:
+            model = TheilSenRegressor(random_state=SEED, max_subpopulation=5000)
+            model.fit(years, vals)
+            slope = float(model.coef_[0])
+        except Exception:
+            slope = float(np.polyfit(years.ravel(), vals, 1)[0])
+
+        start_val = float(vals[0])
+        end_val = float(vals[-1])
+        cross_year = np.nan
+        for i in range(1, len(vals)):
+            if ((vals[i - 1] < 0) and (vals[i] >= 0)) or ((vals[i - 1] > 0) and (vals[i] <= 0)):
+                cross_year = int(grp["year"].iloc[i])
+                break
+
+        if slope > eps and end_val > start_val + eps:
+            trend_label = "catching_up"
+        elif slope < -eps and end_val < start_val - eps:
+            trend_label = "pulling_away"
+        else:
+            trend_label = "stable"
+
+        records.append({
+            "topic": int(tid),
+            slope_col: slope,
+            start_col: start_val,
+            end_col: end_val,
+            "cross_year": cross_year,
+            "trend_label": trend_label,
+            "n_years": n_years,
+        })
+
+    out = pd.DataFrame(records)
+    out["topic_name"] = out["topic"].map(topic_name_map)
+    return out.sort_values("topic").reset_index(drop=True)
+
+
+def plot_gap_heatmap(panel_df, topic_name_map, value_col="delta", rank_col="abs_delta", topk=30, title="", colorbar_label="", out_path=None, figsize=(18, 10)):
+    """绘制 topic × year heatmap。"""
+    if panel_df.empty:
+        print(f"⚠️ {title} 数据为空，跳过 heatmap")
+        return None
+
+    topic_rank = (
+        panel_df.groupby("topic")[rank_col]
+        .mean()
+        .sort_values(ascending=False)
+        .head(min(topk, panel_df["topic"].nunique()))
+        .index.tolist()
+    )
+    hm = panel_df[panel_df["topic"].isin(topic_rank)].copy()
+    hm["topic_label"] = hm["topic"].map(lambda tid: topic_label(tid, topic_name_map, max_len=28))
+
+    pivot = hm.pivot_table(
+        index="topic_label",
+        columns="year",
+        values=value_col,
+        aggfunc="mean",
+        fill_value=0,
+    )
+    label_order = [topic_label(tid, topic_name_map, max_len=28) for tid in topic_rank]
+    pivot = pivot.reindex(label_order)
+
+    vmax = float(np.nanmax(np.abs(pivot.values))) if pivot.size else 1.0
+    vmax = max(vmax, 1e-8)
+    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(pivot.values, aspect="auto", cmap="RdBu_r", norm=norm)
+    ax.set_xticks(np.arange(pivot.shape[1]))
+    ax.set_xticklabels(pivot.columns.tolist(), rotation=90)
+    ax.set_yticks(np.arange(pivot.shape[0]))
+    ax.set_yticklabels(pivot.index.tolist())
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Topic")
+    ax.set_title(title)
+
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label(colorbar_label)
+
+    plt.tight_layout()
+    if out_path is not None:
+        plt.savefig(out_path, dpi=220, bbox_inches="tight")
+        print(f"✅ 已保存: {out_path}")
+    plt.show()
+    plt.close(fig)
+    return out_path
+
+
+def plot_gap_overview(panel_df, topic_name_map, value_col="delta", rank_col="abs_delta", topk=30, title="", ylabel="", out_path=None, figsize=(16, 8)):
+    """绘制 top-k 主题的 gap 趋势总览图。"""
+    if panel_df.empty:
+        print(f"⚠️ {title} 数据为空，跳过 overview")
+        return None
+
+    ranked_topics = (
+        panel_df.groupby("topic")[rank_col]
+        .max()
+        .sort_values(ascending=False)
+        .head(min(topk, panel_df["topic"].nunique()))
+        .index.tolist()
+    )
+
+    fig, ax = plt.subplots(figsize=figsize)
+    for tid in ranked_topics:
+        sub = panel_df[panel_df["topic"] == tid].sort_values("year")
+        if sub.empty:
+            continue
+        ax.plot(
+            sub["year"],
+            sub[value_col],
+            linewidth=1.4,
+            alpha=0.85,
+            label=topic_label(tid, topic_name_map, max_len=24),
+        )
+
+    ax.axhline(0, color="gray", linestyle="--", linewidth=1.1)
+    ax.set_xlabel("Year")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.25)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8, ncol=1)
+    plt.tight_layout()
+    if out_path is not None:
+        plt.savefig(out_path, dpi=220, bbox_inches="tight")
+        print(f"✅ 已保存: {out_path}")
+    plt.show()
+    plt.close(fig)
+    return out_path
+
+
+def plot_gap_bar(panel_df, topic_name_map, year=None, topk=20, title="", out_path=None, figsize=(12, 8)):
+    """绘制最新年份或全期平均的 topic gap 条形图。"""
+    if panel_df.empty:
+        print(f"⚠️ {title} 数据为空，跳过 bar plot")
+        return None
+
+    tmp = panel_df.copy()
+    if year is not None:
+        tmp = tmp[tmp["year"] == year].copy()
+        if tmp.empty:
+            print(f"⚠️ year={year} 没有数据，跳过 {title}")
+            return None
+        agg = tmp[["topic", "share_CN", "share_US", "delta", "abs_delta"]].copy()
+    else:
+        agg = (
+            tmp.groupby("topic")[["share_CN", "share_US", "delta", "abs_delta"]]
+            .mean()
+            .reset_index()
+        )
+
+    agg["topic_label"] = agg["topic"].map(lambda tid: topic_label(tid, topic_name_map, max_len=28))
+    agg = agg.sort_values("abs_delta", ascending=False).head(min(topk, len(agg)))
+
+    fig, ax = plt.subplots(figsize=figsize)
+    colors = ["#E03C31" if x > 0 else "#3C6FE0" for x in agg["delta"]]
+    ax.barh(agg["topic_label"], agg["delta"], color=colors, alpha=0.88)
+    ax.axvline(0, color="black", linewidth=0.9)
+    ax.invert_yaxis()
+    ax.set_xlabel("Δ share (CN − US)")
+    ax.set_ylabel("Topic")
+    ax.set_title(title)
+    ax.grid(True, axis="x", alpha=0.25)
+    plt.tight_layout()
+    if out_path is not None:
+        plt.savefig(out_path, dpi=220, bbox_inches="tight")
+        print(f"✅ 已保存: {out_path}")
+    plt.show()
+    plt.close(fig)
+    return out_path
+
+
+
+
+def plot_topic_gap_timeseries(
+    panel_df,
+    topic_name_map,
+    tid,
+    value_col="delta",
+    trend_row=None,
+    title_prefix="",
+    ylabel="Δ share (CN − US)",
+    out_path=None,
+    show=False,
+    line_color="#7B2CBF",
+    fill_alpha=0.16,
+):
+    """为单个主题绘制时间变化曲线，适合 L1-L4 父主题逐张导出。"""
+    sub = panel_df[panel_df["topic"] == tid].sort_values("year").copy()
+    if sub.empty:
+        return None
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(
+        sub["year"],
+        sub[value_col],
+        "o-",
+        color=line_color,
+        linewidth=2.6,
+        markersize=5.5,
+        alpha=0.95,
+    )
+    ax.fill_between(
+        sub["year"],
+        sub[value_col],
+        0,
+        color=line_color,
+        alpha=fill_alpha,
+    )
+    ax.axhline(0, color="gray", linestyle="--", linewidth=1.4, alpha=0.8)
+
+    if trend_row is not None:
+        cross_year = trend_row.get("cross_year", np.nan)
+        if pd.notna(cross_year):
+            ax.axvline(
+                cross_year,
+                color="green",
+                linestyle=":",
+                linewidth=2.0,
+                alpha=0.9,
+                label=f"cross={int(cross_year)}",
+            )
+            ax.legend(loc="upper right", fontsize=10)
+
+    slope_value = np.nan
+    trend_label = ""
+    if trend_row is not None:
+        trend_label = str(trend_row.get("trend_label", ""))
+        slope_candidates = [k for k in trend_row.keys() if str(k).startswith("slope_")]
+        if len(slope_candidates) > 0:
+            slope_value = trend_row[slope_candidates[0]]
+
+    slope_str = f", slope={slope_value:.2e}" if pd.notna(slope_value) else ""
+    title_main = title_prefix if title_prefix else "Topic Gap"
+    ax.set_title(f"{title_main} — {trend_label}{slope_str}".strip(" —"), fontsize=18)
+    ax.set_xlabel("Year", fontsize=14)
+    ax.set_ylabel(ylabel, fontsize=14)
+    ax.grid(True, alpha=0.25, linewidth=1.1)
+
+    topic_text = topic_label(tid, topic_name_map, max_len=48)
+    ax.text(
+        0.01,
+        0.98,
+        topic_text,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=11,
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.78, "edgecolor": "#dddddd"},
+    )
+
+    plt.tight_layout()
+    if out_path is not None:
+        plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+    return out_path
+
+
+def export_topic_gap_timeseries_batch(
+    panel_df,
+    trend_summary_df,
+    topic_name_map,
+    out_dir,
+    value_col="delta",
+    title_prefix="",
+    ylabel="Δ share (CN − US)",
+    filename_prefix="topic_gap",
+    show=False,
+):
+    """批量导出每个主题各自的时间变化图，并输出文件索引表。"""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    trend_dict = (
+        trend_summary_df.set_index("topic").to_dict("index")
+        if trend_summary_df is not None and not trend_summary_df.empty
+        else {}
+    )
+
+    topic_ids = sorted(panel_df["topic"].dropna().astype(int).unique().tolist())
+    rows = []
+    for tid in topic_ids:
+        safe_name = str(topic_name_map.get(int(tid), f"topic_{int(tid)}")).replace("/", "_")[:80]
+        out_path = out_dir / f"{filename_prefix}_topic_{int(tid)}_{safe_name}.png"
+        plot_topic_gap_timeseries(
+            panel_df=panel_df,
+            topic_name_map=topic_name_map,
+            tid=int(tid),
+            value_col=value_col,
+            trend_row=trend_dict.get(int(tid), {}),
+            title_prefix=title_prefix,
+            ylabel=ylabel,
+            out_path=out_path,
+            show=show,
+        )
+        rows.append({
+            "topic": int(tid),
+            "topic_name": topic_name_map.get(int(tid), f"topic_{int(tid)}"),
+            "file_path": str(out_path),
+        })
+
+    file_index_df = pd.DataFrame(rows)
+    file_index_path = out_dir / f"{filename_prefix}_file_index.csv"
+    file_index_df.to_csv(file_index_path, index=False)
+    print(f"✅ 已批量导出 {len(file_index_df)} 张单主题图: {out_dir}")
+    return {"file_index": file_index_df, "file_index_path": file_index_path, "out_dir": out_dir}
+
+def export_latest_gap_summary(panel_df, topic_name_map, rank_col="abs_delta", value_cols=None, topn=20):
+    """导出某个 panel 的最新年份 top gap summary。"""
+    value_cols = value_cols or ["share_CN", "share_US", "delta", rank_col]
+    latest_year = int(panel_df["year"].max())
+    cols = ["topic", "year"] + value_cols
+    out = (
+        panel_df[panel_df["year"] == latest_year][cols]
+        .copy()
+        .assign(topic_name=lambda x: x["topic"].map(topic_name_map))
+        .sort_values(rank_col, ascending=False)
+        .head(min(topn, panel_df["topic"].nunique()))
+    )
+    return out.reset_index(drop=True)
+
+
+def run_gap_suite(
+    df_in,
+    level_name,
+    topic_col,
+    topic_name_map,
+    start_year=1990,
+    rolling_window=3,
+    rolling_min_periods=None,
+    topk_vis=30,
+    trend_min_years=6,
+    trend_eps=1e-4,
+):
+    """对给定层级运行 annual / rolling / cumulative 全套中美差距分析。"""
+    rolling_min_periods = rolling_window if rolling_min_periods is None else rolling_min_periods
+
+    level_time_dir = TIME_DIR / f"level_{level_name.lower()}"
+    level_fig_dir = FIGS_DIR / f"level_{level_name.lower()}"
+    level_time_dir.mkdir(parents=True, exist_ok=True)
+    level_fig_dir.mkdir(parents=True, exist_ok=True)
+
+    annual_df = build_topic_time_series(df_in, topic_col=topic_col)
+    annual_df = annual_df[annual_df["year"] >= start_year].copy()
+    annual_df["topic_name"] = annual_df["topic"].map(topic_name_map)
+    annual_trend_summary = classify_gap_trends(
+        annual_df,
+        topic_name_map=topic_name_map,
+        value_col="delta",
+        min_years=trend_min_years,
+        eps=trend_eps,
+        slope_col="slope_delta",
+        start_col="delta_start",
+        end_col="delta_end",
+    )
+
+    rolling_df = build_windowed_share_gap(
+        df_in,
+        topic_col=topic_col,
+        window_size=rolling_window,
+        min_periods=rolling_min_periods,
+    )
+    rolling_df = rolling_df[rolling_df["year"] >= start_year].copy()
+    rolling_df["topic_name"] = rolling_df["topic"].map(topic_name_map)
+    rolling_trend_summary = classify_gap_trends(
+        rolling_df,
+        topic_name_map=topic_name_map,
+        value_col="delta",
+        min_years=trend_min_years,
+        eps=trend_eps,
+        slope_col="slope_delta",
+        start_col="delta_start",
+        end_col="delta_end",
+    )
+
+    cumulative_df = build_cumulative_gap(
+        rolling_df,
+        topic_name_map=topic_name_map,
+        start_year=start_year,
+    )
+    cumulative_trend_summary = classify_gap_trends(
+        cumulative_df,
+        topic_name_map=topic_name_map,
+        value_col="cum_delta",
+        min_years=trend_min_years,
+        eps=trend_eps,
+        slope_col="slope_cum_delta",
+        start_col="cum_start",
+        end_col="cum_end",
+    )
+
+    annual_df.to_csv(level_time_dir / "topic_share_yearly.csv", index=False)
+    annual_trend_summary.to_csv(level_time_dir / "topic_trend_summary_yearly.csv", index=False)
+    rolling_df.to_csv(level_time_dir / f"topic_share_gap_roll{rolling_window}.csv", index=False)
+    rolling_trend_summary.to_csv(level_time_dir / f"topic_trend_summary_roll{rolling_window}.csv", index=False)
+    cumulative_df.to_csv(level_time_dir / f"topic_cumulative_gap_from_{start_year}.csv", index=False)
+    cumulative_trend_summary.to_csv(level_time_dir / f"topic_cumulative_trend_summary_from_{start_year}.csv", index=False)
+
+    annual_latest_summary = export_latest_gap_summary(
+        annual_df,
+        topic_name_map=topic_name_map,
+        rank_col="abs_delta",
+        value_cols=["share_CN", "share_US", "delta", "abs_delta"],
+        topn=20,
+    )
+    rolling_latest_summary = export_latest_gap_summary(
+        rolling_df,
+        topic_name_map=topic_name_map,
+        rank_col="abs_delta",
+        value_cols=["share_CN", "share_US", "delta", "abs_delta", "window_count_CN", "window_count_US"],
+        topn=20,
+    )
+    cumulative_latest_summary = export_latest_gap_summary(
+        cumulative_df,
+        topic_name_map=topic_name_map,
+        rank_col="cum_abs_delta",
+        value_cols=["share_CN", "share_US", "delta", "cum_delta", "cum_abs_delta"],
+        topn=20,
+    )
+
+    annual_latest_summary.to_csv(level_time_dir / "summary_latest_gap_topics_yearly.csv", index=False)
+    rolling_latest_summary.to_csv(level_time_dir / f"summary_latest_gap_topics_roll{rolling_window}.csv", index=False)
+    cumulative_latest_summary.to_csv(level_time_dir / f"summary_latest_cumulative_gap_topics_from_{start_year}.csv", index=False)
+
+
+    if level_name == "L0":
+        figure_paths = {
+            "annual_heatmap": plot_gap_heatmap(
+                annual_df,
+                topic_name_map=topic_name_map,
+                value_col="delta",
+                rank_col="abs_delta",
+                topk=topk_vis,
+                title=f"{level_name} Topic-Year Share Gap Heatmap (Annual, CN − US)",
+                colorbar_label="Δ share = share_CN − share_US",
+                out_path=level_fig_dir / "annual_gap_heatmap.png",
+            ),
+            "annual_bar_latest": plot_gap_bar(
+                annual_df,
+                topic_name_map=topic_name_map,
+                year=int(annual_df["year"].max()) if not annual_df.empty else None,
+                topk=min(20, topk_vis),
+                title=f"{level_name} Latest Annual Topic Gap",
+                out_path=level_fig_dir / "annual_gap_bar_latest.png",
+                figsize=(12, max(6, min(20, topk_vis) * 0.38)),
+            ),
+            "rolling_heatmap": plot_gap_heatmap(
+                rolling_df,
+                topic_name_map=topic_name_map,
+                value_col="delta",
+                rank_col="abs_delta",
+                topk=topk_vis,
+                title=f"{level_name} Topic-Year Share Gap Heatmap (Rolling {rolling_window}Y, CN − US)",
+                colorbar_label="Δ share = share_CN − share_US",
+                out_path=level_fig_dir / f"rolling_gap_heatmap_roll{rolling_window}.png",
+            ),
+            "rolling_overview": plot_gap_overview(
+                rolling_df,
+                topic_name_map=topic_name_map,
+                value_col="delta",
+                rank_col="abs_delta",
+                topk=topk_vis,
+                title=f"{level_name} Rolling {rolling_window}Y Gap Overview",
+                ylabel="Δ share (CN − US)",
+                out_path=level_fig_dir / f"rolling_gap_overview_top_{topk_vis}.png",
+            ),
+            "cumulative_heatmap": plot_gap_heatmap(
+                cumulative_df,
+                topic_name_map=topic_name_map,
+                value_col="cum_delta",
+                rank_col="cum_abs_delta",
+                topk=topk_vis,
+                title=f"{level_name} Topic-Year Cumulative Gap Heatmap (since {start_year})",
+                colorbar_label="Cumulative Δ share",
+                out_path=level_fig_dir / f"cumulative_gap_heatmap_from_{start_year}.png",
+            ),
+            "cumulative_overview": plot_gap_overview(
+                cumulative_df,
+                topic_name_map=topic_name_map,
+                value_col="cum_delta",
+                rank_col="cum_abs_delta",
+                topk=topk_vis,
+                title=f"{level_name} Cumulative Gap Overview (since {start_year})",
+                ylabel=f"Cumulative Δ share since {start_year}",
+                out_path=level_fig_dir / f"cumulative_gap_overview_top_{topk_vis}.png",
+            ),
+        }
+    else:
+        figure_paths = {
+            "annual_topic_series": export_topic_gap_timeseries_batch(
+                panel_df=annual_df,
+                trend_summary_df=annual_trend_summary,
+                topic_name_map=topic_name_map,
+                out_dir=level_fig_dir / "annual_gap_by_topic",
+                value_col="delta",
+                title_prefix=f"{level_name} Annual Delta",
+                ylabel="Δ share (CN − US)",
+                filename_prefix="annual_gap",
+                show=False,
+            ),
+            "rolling_topic_series": export_topic_gap_timeseries_batch(
+                panel_df=rolling_df,
+                trend_summary_df=rolling_trend_summary,
+                topic_name_map=topic_name_map,
+                out_dir=level_fig_dir / f"rolling_gap_by_topic_roll{rolling_window}",
+                value_col="delta",
+                title_prefix=f"{level_name} Rolling {rolling_window}Y Delta",
+                ylabel="Δ share (CN − US)",
+                filename_prefix=f"rolling_gap_roll{rolling_window}",
+                show=False,
+            ),
+            "cumulative_topic_series": export_topic_gap_timeseries_batch(
+                panel_df=cumulative_df,
+                trend_summary_df=cumulative_trend_summary,
+                topic_name_map=topic_name_map,
+                out_dir=level_fig_dir / f"cumulative_gap_by_topic_from_{start_year}",
+                value_col="cum_delta",
+                title_prefix=f"{level_name} Cumulative Delta",
+                ylabel=f"Cumulative Δ share (CN − US)",
+                filename_prefix=f"cumulative_gap_from_{start_year}",
+                show=False,
+            ),
+        }
+
+
+    return {
+        "level": level_name,
+        "topic_col": topic_col,
+        "topic_name_map": topic_name_map,
+        "annual": annual_df,
+        "annual_trend_summary": annual_trend_summary,
+        "rolling": rolling_df,
+        "rolling_trend_summary": rolling_trend_summary,
+        "cumulative": cumulative_df,
+        "cumulative_trend_summary": cumulative_trend_summary,
+        "annual_latest_summary": annual_latest_summary,
+        "rolling_latest_summary": rolling_latest_summary,
+        "cumulative_latest_summary": cumulative_latest_summary,
+        "figure_paths": figure_paths,
+        "time_dir": level_time_dir,
+        "fig_dir": level_fig_dir,
+        "n_topics": int(len(topic_name_map)),
+    }

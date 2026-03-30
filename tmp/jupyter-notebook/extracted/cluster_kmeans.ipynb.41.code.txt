@@ -1,0 +1,53 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell T2 — Run Annual / Rolling / Cumulative Gap Analysis for L0~L4
+# ══════════════════════════════════════════════════════════════════════════════
+level_topic_cols = [
+    f"topic_L{i}"
+    for i in range(5)
+    if f"topic_L{i}" in df.columns and f"L{i}" in hier_topic_name_maps
+]
+
+te_df = prepare_gap_base_df(df, topic_cols=level_topic_cols, year_col="year")
+print(f"✅ 时间演化分析样本数: {len(te_df):,}")
+print(f"   年份范围: {te_df['year_int'].min()} - {te_df['year_int'].max()}")
+print(f"   CN: {(te_df['country2'] == 'CN').sum():,} | US: {(te_df['country2'] == 'US').sum():,}")
+print(f"   可用层级: {level_topic_cols}")
+
+gap_results_by_level = {}
+for idx in range(5):
+    level_name = f"L{idx}"
+    topic_col = f"topic_{level_name}"
+    if topic_col not in te_df.columns or level_name not in hier_topic_name_maps:
+        continue
+
+    print()
+    print("=" * 88)
+    print(f"开始运行 {level_name} | {topic_col} | 主题数={len(hier_topic_name_maps[level_name])}")
+    print("=" * 88)
+
+    gap_results_by_level[level_name] = run_gap_suite(
+        df_in=te_df,
+        level_name=level_name,
+        topic_col=topic_col,
+        topic_name_map=hier_topic_name_maps[level_name],
+        start_year=GAP_START_YEAR,
+        rolling_window=ROLLING_WINDOW,
+        rolling_min_periods=ROLLING_MIN_PERIODS,
+        topk_vis=HIER_TOPK_VIS,
+        trend_min_years=TREND_MIN_YEARS,
+        trend_eps=TREND_EPS,
+    )
+
+available_gap_levels = list(gap_results_by_level.keys())
+gap_level_inventory = pd.DataFrame({
+    "level": available_gap_levels,
+    "topic_col": [gap_results_by_level[level]["topic_col"] for level in available_gap_levels],
+    "n_topics": [gap_results_by_level[level]["n_topics"] for level in available_gap_levels],
+    "time_dir": [str(gap_results_by_level[level]["time_dir"]) for level in available_gap_levels],
+    "fig_dir": [str(gap_results_by_level[level]["fig_dir"]) for level in available_gap_levels],
+})
+
+gap_level_inventory.to_csv(TIME_DIR / "gap_level_inventory.csv", index=False)
+print()
+print("✅ 多层级 annual / rolling / cumulative gap 分析已完成")
+print(gap_level_inventory)

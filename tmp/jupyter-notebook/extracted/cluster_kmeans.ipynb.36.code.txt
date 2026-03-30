@@ -1,0 +1,58 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell H1 — Hierarchical Topic Parameters
+# ══════════════════════════════════════════════════════════════════════════════
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from matplotlib.colors import TwoSlopeNorm
+from scipy.cluster.hierarchy import dendrogram, fcluster, linkage
+from scipy.spatial.distance import jensenshannon, pdist
+from scipy.sparse import csr_matrix, issparse
+from sklearn.linear_model import TheilSenRegressor
+
+# ── Hierarchical topics 集中参数区 ──────────────────────────────────────────────
+HIER_USE_CTFIDF = True
+HIER_DISTANCE = "cosine"
+HIER_LINKAGE_METHOD = "average"   # 可改成 "complete" / "ward"
+HIER_LEVEL_TARGETS = [50, 35, 20, 10, 5]
+HIER_TOP_WORDS = 8
+HIER_LABEL_WORDS = 4
+HIER_TOPK_VIS = 30
+HIER_COLOR_THRESHOLD = None
+
+# ── 中美技术差距分析集中参数区 ────────────────────────────────────────────────
+GAP_START_YEAR = 1990
+ROLLING_WINDOW = 3
+ROLLING_MIN_PERIODS = None
+TREND_MIN_YEARS = 6
+TREND_EPS = 1e-4
+LEVEL_COMPARISON_TOPK = 10
+
+TIME_DIR = Path(globals().get("TIME_DIR", Path(OUTPUT_DIR) / "time_evolution"))
+FIGS_DIR = Path(globals().get("FIGS_DIR", TIME_DIR / "figs"))
+HIER_DIR = FIGS_DIR / "hierarchical_topics"
+TIME_DIR.mkdir(parents=True, exist_ok=True)
+FIGS_DIR.mkdir(parents=True, exist_ok=True)
+HIER_DIR.mkdir(parents=True, exist_ok=True)
+
+if ROLLING_MIN_PERIODS is None:
+    ROLLING_MIN_PERIODS = ROLLING_WINDOW
+
+hier_params = {
+    "use_ctfidf": HIER_USE_CTFIDF,
+    "distance": HIER_DISTANCE,
+    "linkage_method": HIER_LINKAGE_METHOD,
+    "level_targets": HIER_LEVEL_TARGETS,
+    "top_words": HIER_TOP_WORDS,
+    "label_words": HIER_LABEL_WORDS,
+    "topk_vis": HIER_TOPK_VIS,
+    "color_threshold": HIER_COLOR_THRESHOLD,
+    "gap_start_year": GAP_START_YEAR,
+    "rolling_window": ROLLING_WINDOW,
+    "rolling_min_periods": ROLLING_MIN_PERIODS,
+}
+
+print("✅ Hierarchical topic 参数已初始化")
+print(pd.Series(hier_params))

@@ -14,3 +14,14 @@ output/
 
 # Local large datasets
 data/dataCleanSCIE.csv
+<<<<<<< HEAD
+
+backup/
+
+data/
+
+cluster/outputs_manual_topic_model/modular_pipeline/specter2_proximity/shared/clean_dataset.csv
+=======
+>>>>>>> parent of 6611ea4 (Add topic pipeline common utilities and KMeans clustering notebook)
+outputs_manual_topic_model/modular_pipeline/specter2_proximity/shared/clean_dataset.csv
+/outputs_manual_topic_model/modular_pipeline/specter2_proximity/shared

@@ -1,0 +1,57 @@
+topic_name_map_anchor = dict(zip(topic_info_df_anchor["topic"], topic_info_df_anchor["name"]))
+topic_name_map_fuzzy = dict(zip(topic_info_df_fuzzy["topic"], topic_info_df_fuzzy["name"]))
+
+
+def enrich_doc_topic_summary_with_names(doc_topic_summary_df: pd.DataFrame, topic_name_map: dict) -> pd.DataFrame:
+    '''把多主题摘要中的 topic id 再翻译成可读主题名。'''
+    rows = []
+    for _, row in doc_topic_summary_df.iterrows():
+        topic_ids = json.loads(row["topic_ids_json"])
+        topic_weights = json.loads(row["topic_weights_json"])
+
+        topic_names = [topic_name_map.get(int(topic_id), f"topic_{int(topic_id)}") for topic_id in topic_ids]
+        topic_name_weight_pairs = [
+            {
+                "topic": int(topic_id),
+                "name": topic_name_map.get(int(topic_id), f"topic_{int(topic_id)}"),
+                "weight": float(weight),
+            }
+            for topic_id, weight in zip(topic_ids, topic_weights)
+        ]
+
+        payload = row.to_dict()
+        payload["topic_names_json"] = json.dumps(topic_names, ensure_ascii=False)
+        payload["topic_name_weight_pairs_json"] = json.dumps(topic_name_weight_pairs, ensure_ascii=False)
+        rows.append(payload)
+
+    return pd.DataFrame(rows)
+
+
+# 默认主题命名也改成 fuzzy 版本。
+topic_name_map = dict(topic_name_map_fuzzy)
+df["topic_name"] = df["topic"].map(topic_name_map)
+df["topic_name_anchor"] = df["topic_anchor"].map(topic_name_map_anchor)
+df["topic_name_fuzzy"] = df["topic_anchor"].map(topic_name_map_fuzzy)
+
+topic_docs_df = topic_docs_df_fuzzy.copy()
+doc_topic_summary_named_df = enrich_doc_topic_summary_with_names(doc_topic_summary_df, topic_name_map_fuzzy)
+
+# 把带主题名的多主题信息挂回原始 df。
+df["topic_multi_names_json"] = doc_topic_summary_named_df["topic_names_json"].values
+df["topic_multi_name_weight_pairs_json"] = doc_topic_summary_named_df["topic_name_weight_pairs_json"].values
+
+doc_topic_summary_named_df.to_csv(fuzzy_output_dir / "doc_topic_summary_named_df_fuzzy.csv", index=False)
+
+topic_summary_df = pd.DataFrame({
+    "topic": np.arange(FUZZY_N_CLUSTERS),
+    "hard_anchor_size": [(df["topic_anchor"] == i).sum() for i in range(FUZZY_N_CLUSTERS)],
+    "fuzzy_membership_size": membership_matrix.sum(axis=0),
+    "anchor_name": [topic_name_map_anchor.get(i, f"topic_{i}") for i in range(FUZZY_N_CLUSTERS)],
+    "fuzzy_name": [topic_name_map_fuzzy.get(i, f"topic_{i}") for i in range(FUZZY_N_CLUSTERS)],
+})
+topic_summary_df.to_csv(fuzzy_output_dir / "topic_summary_hard_vs_fuzzy.csv", index=False)
+
+print("带主题名的多主题摘要预览：")
+display(doc_topic_summary_named_df[[
+    "doc_index", "top1_topic", "top1_weight", "n_topics_kept", "retained_weight", "topic_name_weight_pairs_json"
+]].head(10))

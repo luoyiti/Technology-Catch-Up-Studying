@@ -1,0 +1,331 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell H2 — Hierarchical Topic Helpers
+# ══════════════════════════════════════════════════════════════════════════════
+def _resolve_required_object(primary_name, fallback_names=None):
+    """从 globals() 中解析 notebook 已有对象。"""
+    fallback_names = fallback_names or []
+    for name in [primary_name] + list(fallback_names):
+        if name in globals():
+            return globals()[name]
+    raise KeyError(f"缺少必要对象: {primary_name}")
+
+
+def _ensure_dense(matrix):
+    """把稀疏矩阵安全转成 dense ndarray。"""
+    if issparse(matrix):
+        return matrix.toarray()
+    return np.asarray(matrix)
+
+
+def _compute_ctfidf_from_counts(count_matrix):
+    """对给定 count matrix 重新计算 c-TF-IDF。"""
+    if not issparse(count_matrix):
+        count_matrix = csr_matrix(np.asarray(count_matrix, dtype=float))
+
+    if "compute_c_tf_idf" in globals():
+        return np.asarray(compute_c_tf_idf(count_matrix))
+
+    X = count_matrix.astype(float).toarray()
+    row_sums = X.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1.0
+    tf = X / row_sums
+    df_words = (X > 0).sum(axis=0)
+    avg_nr_words = X.sum(axis=1).mean()
+    idf = np.log((avg_nr_words / (df_words + 1e-12)) + 1)
+    return tf * idf.reshape(1, -1)
+
+
+def _extract_top_words_from_scores(scores, words_array, top_n=8):
+    """从一行 c-TF-IDF 分数中提取 top words。"""
+    scores = np.asarray(scores).ravel()
+    if scores.size == 0:
+        return [], []
+    top_idx = np.argsort(scores)[::-1][:top_n]
+    top_words = [str(words_array[i]) for i in top_idx]
+    top_scores = [float(scores[i]) for i in top_idx]
+    return top_words, top_scores
+
+
+def _format_topic_name(top_words, label_words=4, prefix="topic"):
+    """把 top words 格式化成可读主题名。"""
+    if len(top_words) == 0:
+        return prefix
+    return "_".join([str(w) for w in top_words[:label_words]])
+
+
+def _resolve_level_cluster_counts(n_topics, target_counts, max_levels=5):
+    """根据 flat topic 数量自适应生成 L0~L4 的目标簇数。"""
+    counts = []
+    for c in [n_topics] + list(target_counts):
+        c = max(1, min(int(c), int(n_topics)))
+        if c not in counts:
+            counts.append(c)
+    counts = sorted(counts, reverse=True)
+
+    target_n = min(max_levels, int(n_topics))
+    while len(counts) < target_n:
+        candidates = []
+        for hi, lo in zip(counts[:-1], counts[1:]):
+            if hi - lo > 1:
+                mid = int(round((hi + lo) / 2))
+                for cand in [mid, mid + 1, mid - 1]:
+                    if lo < cand < hi and cand not in counts:
+                        candidates.append((hi - lo, cand))
+                        break
+        if counts[-1] > 1:
+            tail_mid = int(round((counts[-1] + 1) / 2))
+            for cand in [tail_mid, tail_mid - 1]:
+                if 1 <= cand < counts[-1] and cand not in counts:
+                    candidates.append((counts[-1] - 1, cand))
+                    break
+        if not candidates:
+            break
+        best = sorted(candidates, key=lambda x: (-x[0], -x[1]))[0][1]
+        counts.append(best)
+        counts = sorted(set(counts), reverse=True)
+
+    return counts[:target_n]
+
+
+def build_hierarchical_topic_tree(
+    topic_docs_df,
+    X_counts,
+    c_tf_idf_matrix,
+    words,
+    base_topic_name_map,
+    distance="cosine",
+    linkage_method="average",
+    top_words=8,
+    label_words=4,
+    representation_matrix=None,
+    representation_name="topic_representation",
+):
+    """基于 flat topic 表示构建层次树，并为内部节点重算 merged c-TF-IDF。"""
+    leaf_topic_ids = topic_docs_df["topic"].astype(int).tolist()
+    n_topics = len(leaf_topic_ids)
+    if n_topics < 2:
+        raise ValueError("flat topic 数量不足，无法构建 hierarchical topics。")
+
+    counts_dense = _ensure_dense(X_counts).astype(float)
+    ctfidf_dense = _ensure_dense(c_tf_idf_matrix).astype(float)
+    representation_dense = _ensure_dense(representation_matrix if representation_matrix is not None else c_tf_idf_matrix).astype(float)
+    words_array = np.asarray(words)
+
+    if linkage_method == "ward":
+        row_norm = np.linalg.norm(representation_dense, axis=1, keepdims=True)
+        row_norm[row_norm == 0] = 1.0
+        linkage_input = representation_dense / row_norm
+        hier_linkage_matrix = linkage(
+            linkage_input,
+            method="ward",
+            optimal_ordering=True,
+        )
+        linkage_metric_used = "euclidean_on_l2_normalized_c_tf_idf"
+    else:
+        dist_vec = pdist(representation_dense, metric=distance)
+        dist_vec = np.nan_to_num(dist_vec, nan=1.0, posinf=1.0, neginf=0.0)
+        hier_linkage_matrix = linkage(
+            dist_vec,
+            method=linkage_method,
+            optimal_ordering=True,
+        )
+        linkage_metric_used = distance
+
+    node_rows = []
+    node_counts = {}
+    node_leaf_topics = {}
+    active_nodes = list(range(n_topics))
+    leafset_to_node_id = {}
+
+    for row_idx, topic_id in enumerate(leaf_topic_ids):
+        topic_id = int(topic_id)
+        scores = ctfidf_dense[row_idx]
+        top_words_i, top_scores_i = _extract_top_words_from_scores(scores, words_array, top_n=top_words)
+        name_i = str(base_topic_name_map.get(topic_id, _format_topic_name(top_words_i, label_words, prefix=f"T{topic_id}")))
+        short_name_i = _format_topic_name(top_words_i, min(label_words, 3), prefix=f"T{topic_id}")
+        node_counts[row_idx] = counts_dense[row_idx].copy()
+        node_leaf_topics[row_idx] = [topic_id]
+        leafset_to_node_id[(topic_id,)] = row_idx
+        node_rows.append({
+            "node_id": int(row_idx),
+            "left": np.nan,
+            "right": np.nan,
+            "height": 0.0,
+            "n_leaf_topics": 1,
+            "leaf_topics": [topic_id],
+            "top_words": top_words_i,
+            "top_scores": top_scores_i,
+            "name": name_i,
+            "short_name": short_name_i,
+            "is_leaf": True,
+        })
+
+    for merge_idx, (left, right, height, size) in enumerate(hier_linkage_matrix):
+        left = int(left)
+        right = int(right)
+        node_id = int(n_topics + merge_idx)
+        merged_counts = node_counts[left] + node_counts[right]
+        merged_leaf_topics = sorted(set(node_leaf_topics[left]) | set(node_leaf_topics[right]))
+
+        survivors = [nid for nid in active_nodes if nid not in {left, right}]
+        active_count_matrix = np.vstack([node_counts[nid] for nid in survivors] + [merged_counts])
+        active_ctfidf_matrix = _compute_ctfidf_from_counts(active_count_matrix)
+        parent_scores = active_ctfidf_matrix[-1]
+        top_words_i, top_scores_i = _extract_top_words_from_scores(parent_scores, words_array, top_n=top_words)
+        name_i = _format_topic_name(top_words_i, label_words=label_words, prefix=f"M{node_id}")
+        short_name_i = _format_topic_name(top_words_i, label_words=min(label_words, 3), prefix=f"M{node_id}")
+
+        node_counts[node_id] = merged_counts
+        node_leaf_topics[node_id] = merged_leaf_topics
+        active_nodes = survivors + [node_id]
+        leafset_to_node_id[tuple(merged_leaf_topics)] = node_id
+
+        node_rows.append({
+            "node_id": node_id,
+            "left": left,
+            "right": right,
+            "height": float(height),
+            "n_leaf_topics": int(size),
+            "leaf_topics": merged_leaf_topics,
+            "top_words": top_words_i,
+            "top_scores": top_scores_i,
+            "name": name_i,
+            "short_name": short_name_i,
+            "is_leaf": False,
+        })
+
+    hier_node_info_df = pd.DataFrame(node_rows).sort_values("node_id").reset_index(drop=True)
+
+    return {
+        "leaf_topic_ids": leaf_topic_ids,
+        "counts_dense": counts_dense,
+        "ctfidf_dense": ctfidf_dense,
+        "representation_dense": representation_dense,
+        "representation_name": representation_name,
+        "words_array": words_array,
+        "linkage_matrix": hier_linkage_matrix,
+        "node_info_df": hier_node_info_df,
+        "leafset_to_node_id": leafset_to_node_id,
+        "linkage_metric_used": linkage_metric_used,
+    }
+
+
+def build_hierarchy_level(topic_docs_df, X_counts, words, linkage_matrix, leafset_to_node_id, n_clusters, top_words=8, label_words=4):
+    """将 hierarchy 切成指定簇数，并生成该层级的 topic 映射与名称。"""
+    leaf_topic_ids = topic_docs_df["topic"].astype(int).tolist()
+    topic_to_row = {int(topic_id): idx for idx, topic_id in enumerate(leaf_topic_ids)}
+    counts_dense = _ensure_dense(X_counts).astype(float)
+    words_array = np.asarray(words)
+
+    raw_cluster_labels = fcluster(linkage_matrix, t=int(n_clusters), criterion="maxclust")
+    membership_df = pd.DataFrame({
+        "leaf_topic": leaf_topic_ids,
+        "cluster_raw": raw_cluster_labels,
+    })
+
+    cluster_order = (
+        membership_df.groupby("cluster_raw")["leaf_topic"]
+        .agg(["size", "min"])
+        .sort_values(["size", "min"], ascending=[False, True])
+        .reset_index()
+    )
+    raw_to_cluster = {
+        int(row.cluster_raw): int(idx)
+        for idx, row in enumerate(cluster_order.itertuples(index=False))
+    }
+    topic_to_cluster = {
+        int(row.leaf_topic): int(raw_to_cluster[int(row.cluster_raw)])
+        for row in membership_df.itertuples(index=False)
+    }
+
+    cluster_rows = []
+    cluster_count_rows = []
+    for cluster_id in sorted(set(topic_to_cluster.values())):
+        member_topics = sorted([topic for topic, cid in topic_to_cluster.items() if cid == cluster_id])
+        row_indices = [topic_to_row[t] for t in member_topics]
+        merged_counts = counts_dense[row_indices].sum(axis=0)
+        cluster_count_rows.append(merged_counts)
+        cluster_rows.append({
+            "topic": int(cluster_id),
+            "leaf_topics": member_topics,
+            "n_leaf_topics": len(member_topics),
+            "source_node_id": leafset_to_node_id.get(tuple(member_topics), np.nan),
+        })
+
+    cluster_count_matrix = np.vstack(cluster_count_rows)
+    cluster_ctfidf_matrix = _compute_ctfidf_from_counts(cluster_count_matrix)
+
+    for row_idx, row in enumerate(cluster_rows):
+        top_words_i, top_scores_i = _extract_top_words_from_scores(
+            cluster_ctfidf_matrix[row_idx],
+            words_array,
+            top_n=top_words,
+        )
+        row["top_words"] = top_words_i
+        row["top_scores"] = top_scores_i
+        row["name"] = _format_topic_name(top_words_i, label_words=label_words, prefix=f"C{row['topic']}")
+
+    level_topic_info_df = pd.DataFrame(cluster_rows).sort_values("topic").reset_index(drop=True)
+    level_topic_name_map = dict(zip(level_topic_info_df["topic"], level_topic_info_df["name"]))
+
+    return topic_to_cluster, level_topic_info_df, level_topic_name_map
+
+
+def plot_hierarchical_dendrogram(linkage_matrix, leaf_topic_ids, leaf_name_map, node_info_df, out_path, linkage_method, linkage_metric, color_threshold=None, figsize=(24, 10)):
+    """绘制 hierarchical dendrogram，并尽量标注内部 merged topic 名称。"""
+    leaf_labels = [
+        f"T{int(tid)}: {str(leaf_name_map.get(int(tid), f'topic_{int(tid)}'))[:42]}"
+        for tid in leaf_topic_ids
+    ]
+
+    if color_threshold is None:
+        color_threshold = 0.7 * float(np.max(linkage_matrix[:, 2]))
+
+    fig, ax = plt.subplots(figsize=figsize)
+    dendro_data = dendrogram(
+        linkage_matrix,
+        labels=leaf_labels,
+        leaf_rotation=90,
+        leaf_font_size=9,
+        color_threshold=color_threshold,
+        above_threshold_color="#8c8c8c",
+        ax=ax,
+    )
+
+    ax.set_title(
+        f"Hierarchical Topic Dendrogram ({linkage_method}, {linkage_metric})",
+        fontsize=15,
+    )
+    ax.set_xlabel("Flat Topics")
+    ax.set_ylabel("Linkage Distance")
+    ax.grid(True, axis="y", alpha=0.2)
+
+    node_name_lookup = node_info_df.set_index("node_id")["short_name"].to_dict()
+    merge_points = []
+    n_topics = len(leaf_topic_ids)
+    for row_idx, (icoord, dcoord) in enumerate(zip(dendro_data["icoord"], dendro_data["dcoord"])):
+        node_id = n_topics + row_idx
+        x_pos = 0.5 * (icoord[1] + icoord[2])
+        y_pos = dcoord[1]
+        merge_points.append((node_id, x_pos, y_pos))
+
+    for node_id, x_pos, y_pos in sorted(merge_points, key=lambda x: x[2], reverse=True)[: min(20, len(merge_points))]:
+        label = str(node_name_lookup.get(node_id, f"M{node_id}"))[:40]
+        ax.text(
+            x_pos,
+            y_pos,
+            label,
+            rotation=90,
+            ha="center",
+            va="bottom",
+            fontsize=7.5,
+            color="#4d4d4d",
+            alpha=0.9,
+        )
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+    print(f"✅ 已保存层次树图: {out_path}")
+    return dendro_data

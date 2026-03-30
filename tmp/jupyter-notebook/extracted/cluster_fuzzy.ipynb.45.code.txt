@@ -1,0 +1,160 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell T2 — Run Annual / Rolling / Cumulative Gap Analysis for L0~L4
+# ══════════════════════════════════════════════════════════════════════════════
+level_topic_cols = [
+    f"topic_L{i}"
+    for i in range(5)
+    if f"topic_L{i}" in df.columns and f"L{i}" in hier_topic_name_maps
+]
+
+te_df = prepare_gap_base_df_with_index(df, topic_cols=level_topic_cols, year_col="year")
+print(f"✅ 时间演化分析样本数: {len(te_df):,}")
+print(f"   年份范围: {te_df['year_int'].min()} - {te_df['year_int'].max()}")
+print(f"   CN: {(te_df['country2'] == 'CN').sum():,} | US: {(te_df['country2'] == 'US').sum():,}")
+print(f"   可用层级: {level_topic_cols}")
+
+TIME_ROOT = Path(OUTPUT_DIR) / "time_evolution"
+TIME_DIR_HARD = TIME_ROOT / "hard_anchor_baseline"
+FIGS_DIR_HARD = TIME_DIR_HARD / "figs"
+TIME_DIR_FUZZY = TIME_ROOT / "fuzzy_weighted_main"
+FIGS_DIR_FUZZY = TIME_DIR_FUZZY / "figs"
+
+gap_results_by_level_hard = {}
+gap_results_by_level_fuzzy = {}
+
+for idx in range(5):
+    level_name = f"L{idx}"
+    topic_col = f"topic_{level_name}"
+    if topic_col not in te_df.columns or level_name not in hier_topic_name_maps:
+        continue
+
+    print()
+    print("=" * 88)
+    print(f"开始运行 {level_name} | {topic_col} | 主题数={len(hier_topic_name_maps[level_name])}")
+    print("=" * 88)
+
+    gap_results_by_level_hard[level_name] = run_gap_suite_with_dirs(
+        run_fn=run_gap_suite,
+        time_dir=TIME_DIR_HARD,
+        fig_dir=FIGS_DIR_HARD,
+        df_in=te_df,
+        level_name=level_name,
+        topic_col=topic_col,
+        topic_name_map=hier_topic_name_maps[level_name],
+        start_year=GAP_START_YEAR,
+        rolling_window=ROLLING_WINDOW,
+        rolling_min_periods=ROLLING_MIN_PERIODS,
+        topk_vis=HIER_TOPK_VIS,
+        trend_min_years=TREND_MIN_YEARS,
+        trend_eps=TREND_EPS,
+    )
+
+    gap_results_by_level_fuzzy[level_name] = run_gap_suite_with_dirs(
+        run_fn=run_fuzzy_gap_suite,
+        time_dir=TIME_DIR_FUZZY,
+        fig_dir=FIGS_DIR_FUZZY,
+        df_in=te_df,
+        level_name=level_name,
+        membership_level=membership_by_level[level_name],
+        topic_name_map=hier_topic_name_maps[level_name],
+        start_year=GAP_START_YEAR,
+        rolling_window=ROLLING_WINDOW,
+        rolling_min_periods=ROLLING_MIN_PERIODS,
+        topk_vis=HIER_TOPK_VIS,
+        trend_min_years=TREND_MIN_YEARS,
+        trend_eps=TREND_EPS,
+    )
+
+# notebook 默认主版本切到 fuzzy，而不是 hard。
+gap_results_by_level = gap_results_by_level_fuzzy
+
+available_gap_levels_hard = list(gap_results_by_level_hard.keys())
+available_gap_levels_fuzzy = list(gap_results_by_level_fuzzy.keys())
+
+gap_level_inventory_hard = pd.DataFrame({
+    "mode": "hard_anchor_baseline",
+    "level": available_gap_levels_hard,
+    "topic_col": [gap_results_by_level_hard[level]["topic_col"] for level in available_gap_levels_hard],
+    "n_topics": [gap_results_by_level_hard[level]["n_topics"] for level in available_gap_levels_hard],
+    "time_dir": [str(gap_results_by_level_hard[level]["time_dir"]) for level in available_gap_levels_hard],
+    "fig_dir": [str(gap_results_by_level_hard[level]["fig_dir"]) for level in available_gap_levels_hard],
+})
+gap_level_inventory_fuzzy = pd.DataFrame({
+    "mode": "fuzzy_weighted_main",
+    "level": available_gap_levels_fuzzy,
+    "topic_col": [f"membership_{level}" for level in available_gap_levels_fuzzy],
+    "n_topics": [gap_results_by_level_fuzzy[level]["n_topics"] for level in available_gap_levels_fuzzy],
+    "time_dir": [str(gap_results_by_level_fuzzy[level]["time_dir"]) for level in available_gap_levels_fuzzy],
+    "fig_dir": [str(gap_results_by_level_fuzzy[level]["fig_dir"]) for level in available_gap_levels_fuzzy],
+})
+
+TIME_ROOT.mkdir(parents=True, exist_ok=True)
+gap_level_inventory_hard.to_csv(TIME_ROOT / "gap_level_inventory_hard.csv", index=False)
+gap_level_inventory_fuzzy.to_csv(TIME_ROOT / "gap_level_inventory_fuzzy.csv", index=False)
+
+for mode_name, result_dict in [("hard", gap_results_by_level_hard), ("fuzzy", gap_results_by_level_fuzzy)]:
+    for level_name, result in result_dict.items():
+        result["annual"].to_csv(TIME_ROOT / f"annual_gap_{mode_name}_{level_name}.csv", index=False)
+        result["rolling"].to_csv(TIME_ROOT / f"rolling_gap_{mode_name}_{level_name}.csv", index=False)
+        result["cumulative"].to_csv(TIME_ROOT / f"cumulative_gap_{mode_name}_{level_name}.csv", index=False)
+
+# ── 新增 fuzzy 时间指标 1：国家层面的平均多主题性 ─────────────────────────────
+fuzzy_diag_root = TIME_ROOT / "fuzzy_multitopic_diagnostics"
+country_multitopic_dir = fuzzy_diag_root / "country_multitopic"
+topic_boundary_dir = fuzzy_diag_root / "topic_boundary"
+topic_country_dir = fuzzy_diag_root / "topic_country_cross"
+for p in [country_multitopic_dir, topic_boundary_dir, topic_country_dir]:
+    p.mkdir(parents=True, exist_ok=True)
+
+country_multitopic_yearly_df = build_country_multitopic_yearly_metrics(te_df, start_year=GAP_START_YEAR)
+country_multitopic_yearly_df.to_csv(country_multitopic_dir / "country_multitopic_yearly_metrics.csv", index=False)
+
+latest_country_multitopic_df = (
+    country_multitopic_yearly_df
+    .sort_values("year")
+    .groupby("country2")
+    .tail(1)
+    .sort_values("country2")
+    .reset_index(drop=True)
+)
+latest_country_multitopic_df.to_csv(country_multitopic_dir / "country_multitopic_latest_year.csv", index=False)
+plot_country_multitopic_yearly_metrics(country_multitopic_yearly_df, country_multitopic_dir)
+
+# ── 新增 fuzzy 时间指标 2：主题层面的边界性 ─────────────────────────────────
+topic_boundary_df = build_topic_boundary_metrics(
+    te_df,
+    membership_level=membership_by_level["L0"],
+    topic_name_map=hier_topic_name_maps["L0"],
+)
+topic_boundary_df.to_csv(topic_boundary_dir / "topic_boundary_metrics.csv", index=False)
+plot_topic_boundary_metrics(topic_boundary_df, topic_boundary_dir, topk=15)
+
+# ── 新增 fuzzy 时间指标 3：国家-主题交叉性差异 ───────────────────────────────
+topic_country_cross_panel_df, topic_country_cross_diff_df = build_topic_country_cross_metrics(
+    te_df,
+    membership_level=membership_by_level["L0"],
+    topic_name_map=hier_topic_name_maps["L0"],
+)
+topic_country_cross_panel_df.to_csv(topic_country_dir / "topic_country_cross_panel.csv", index=False)
+topic_country_cross_diff_df.to_csv(topic_country_dir / "topic_country_cross_diff.csv", index=False)
+plot_topic_country_cross_metrics(topic_country_cross_diff_df, topic_country_dir, topk=15)
+
+globals()["TIME_ROOT"] = TIME_ROOT
+globals()["te_df"] = te_df
+globals()["country_multitopic_yearly_df"] = country_multitopic_yearly_df
+globals()["latest_country_multitopic_df"] = latest_country_multitopic_df
+globals()["topic_boundary_df"] = topic_boundary_df
+globals()["topic_country_cross_panel_df"] = topic_country_cross_panel_df
+globals()["topic_country_cross_diff_df"] = topic_country_cross_diff_df
+
+print()
+print("✅ 多层级 annual / rolling / cumulative gap 分析已完成")
+print("✅ notebook 默认主结果已切换到 fuzzy_weighted_main")
+display(gap_level_inventory_hard)
+display(gap_level_inventory_fuzzy)
+print("✅ 国家层面的平均多主题性（最新年份）")
+display(latest_country_multitopic_df)
+print("✅ 主题层面的边界性 Top 10")
+display(topic_boundary_df.head(10))
+print("✅ 国家-主题交叉性差异 Top 10")
+display(topic_country_cross_diff_df.head(10))

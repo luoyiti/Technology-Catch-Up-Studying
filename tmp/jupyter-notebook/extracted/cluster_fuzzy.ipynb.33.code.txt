@@ -1,0 +1,2 @@
+# [保留原函数名] `extract_top_words_per_topic` 已在上一 cell 扩展为空 topic 保护版
+pass

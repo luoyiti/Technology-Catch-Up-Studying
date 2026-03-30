@@ -1,0 +1,8 @@
+# notebook 收尾预览：默认展示 fuzzy 主版本下的关键表
+print("当前默认层次树主方法：", HIER_PRIMARY_METHOD)
+print("当前默认时间演化主版本：fuzzy_weighted_main")
+
+display(hierarchy_method_comparison_df.head(10))
+display(country_multitopic_yearly_df.head(10))
+display(topic_boundary_df.head(10))
+display(topic_country_cross_diff_df.head(10))

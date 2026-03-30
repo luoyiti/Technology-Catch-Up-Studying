@@ -1,0 +1,4 @@
+topic_name_map = dict(zip(topic_info_df["topic"], topic_info_df["name"]))
+df["topic_name"] = df["topic"].map(topic_name_map)
+
+df[["topic", "topic_name", "text"]].head()

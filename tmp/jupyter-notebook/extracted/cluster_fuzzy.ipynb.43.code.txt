@@ -1,0 +1,589 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell T1b — Fuzzy Gap Helpers / Soft Diagnostics
+# ══════════════════════════════════════════════════════════════════════════════
+def prepare_gap_base_df_with_index(df_in, topic_cols=None, year_col="year"):
+    '''整理中美时间演化分析的基础表，并保留文档索引。
+
+    设计目标：
+    1. 后续 fuzzy membership 需要按原始文档索引回查，所以这里必须保留 `doc_index`；
+    2. 国家列可能叫 `country` 或 `country_code`，这里统一映射为 `country2`；
+    3. `topic_cols` 在 hard baseline 中需要，但在纯 fuzzy 指标分析中可以为空。
+    '''
+    topic_cols = list(topic_cols or [])
+    base_df = df_in.copy().reset_index(drop=True)
+    if "doc_index" not in base_df.columns:
+        base_df["doc_index"] = np.arange(len(base_df))
+
+    if "country2" not in base_df.columns:
+        if "country_code" in base_df.columns:
+            base_df["country2"] = base_df["country_code"].map(
+                lambda x: "CN" if str(x).upper() in {"CN", "CHN", "CHINA"} else
+                ("US" if str(x).upper() in {"US", "USA", "UNITED STATES"} else "OTHER")
+            )
+        elif "country" in base_df.columns:
+            def _map_country(x):
+                s = str(x).upper()
+                if ("CHINA" in s) or (s in {"CN", "CHN"}):
+                    return "CN"
+                if ("UNITED STATES" in s) or (s in {"US", "USA"}):
+                    return "US"
+                return "OTHER"
+            base_df["country2"] = base_df["country"].map(_map_country)
+        else:
+            raise RuntimeError("没有找到国家列（country / country_code）。")
+
+    base_df["year_int"] = pd.to_numeric(base_df[year_col], errors="coerce")
+    required_cols = ["doc_index", "country2", "year_int"] + topic_cols
+    base_df = base_df.dropna(subset=required_cols).copy()
+    base_df["doc_index"] = base_df["doc_index"].astype(int)
+    base_df["year_int"] = base_df["year_int"].astype(int)
+
+    for col in topic_cols:
+        base_df[col] = pd.to_numeric(base_df[col], errors="coerce")
+        base_df = base_df.dropna(subset=[col]).copy()
+        base_df[col] = base_df[col].astype(int)
+
+    base_df = base_df[base_df["country2"].isin(["CN", "US"])].copy()
+    base_df = base_df[(base_df["year_int"] >= 1900) & (base_df["year_int"] <= 2100)].copy()
+    return base_df.reset_index(drop=True)
+
+
+def run_gap_suite_with_dirs(run_fn, time_dir, fig_dir, **kwargs):
+    '''临时重定向 TIME_DIR / FIGS_DIR，便于 hard / fuzzy 结果分目录保存。'''
+    global TIME_DIR, FIGS_DIR
+    old_time_dir = TIME_DIR
+    old_fig_dir = FIGS_DIR
+    TIME_DIR = Path(time_dir)
+    FIGS_DIR = Path(fig_dir)
+    TIME_DIR.mkdir(parents=True, exist_ok=True)
+    FIGS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        return run_fn(**kwargs)
+    finally:
+        TIME_DIR = old_time_dir
+        FIGS_DIR = old_fig_dir
+
+
+def build_fuzzy_topic_time_series(
+    df_in,
+    membership_level,
+    year_col="year_int",
+    country_col="country2",
+    doc_index_col="doc_index",
+):
+    '''按 fuzzy membership 计算国家-年份-主题时间面板。
+
+    数学定义：
+    - 主题权重：w_{c,t,k} = sum_{i in (c,t)} u_{ik}
+    - 主题份额：share_{c,t,k} = w_{c,t,k} / sum_j w_{c,t,j}
+
+    解释重点：
+    - 分子不再是“落到 topic k 的论文篇数”，而是“投向 topic k 的总权重”；
+    - 因为每篇论文的 membership 行和为 1，所以分母等价于该国家该年份的论文数；
+    - 这正是 soft/fuzzy 版本与 hard count 版本的根本区别。
+    '''
+    tmp = df_in[[doc_index_col, year_col, country_col]].copy()
+    tmp = tmp[tmp[country_col].isin(["CN", "US"])].dropna().copy()
+    tmp[doc_index_col] = tmp[doc_index_col].astype(int)
+    tmp[year_col] = tmp[year_col].astype(int)
+
+    membership_level = safe_row_normalize(membership_level)
+    valid_mask = (tmp[doc_index_col] >= 0) & (tmp[doc_index_col] < membership_level.shape[0])
+    tmp = tmp[valid_mask].copy()
+
+    years = sorted(tmp[year_col].unique().tolist())
+    n_topics = membership_level.shape[1]
+    rows = []
+
+    for year in years:
+        tmp_year = tmp[tmp[year_col] == year].copy()
+        mem_year = membership_level[tmp_year[doc_index_col].values]
+
+        cn_mask = (tmp_year[country_col].values == "CN")
+        us_mask = (tmp_year[country_col].values == "US")
+
+        cn_weights = mem_year[cn_mask].sum(axis=0) if cn_mask.any() else np.zeros(n_topics, dtype=np.float64)
+        us_weights = mem_year[us_mask].sum(axis=0) if us_mask.any() else np.zeros(n_topics, dtype=np.float64)
+        n_cn_papers = int(cn_mask.sum())
+        n_us_papers = int(us_mask.sum())
+
+        total_cn = float(cn_weights.sum())
+        total_us = float(us_weights.sum())
+
+        for topic_id in range(n_topics):
+            share_cn = float(cn_weights[topic_id] / total_cn) if total_cn > 0 else 0.0
+            share_us = float(us_weights[topic_id] / total_us) if total_us > 0 else 0.0
+            delta = share_cn - share_us
+            rows.append({
+                "topic": int(topic_id),
+                "year": int(year),
+                "weight_CN": float(cn_weights[topic_id]),
+                "weight_US": float(us_weights[topic_id]),
+                "paper_count_CN": n_cn_papers,
+                "paper_count_US": n_us_papers,
+                "share_CN": share_cn,
+                "share_US": share_us,
+                "delta": delta,
+                "abs_delta": abs(delta),
+            })
+
+    return pd.DataFrame(rows).sort_values(["topic", "year"]).reset_index(drop=True)
+
+
+def build_fuzzy_windowed_share_gap(annual_df, window_size=3, min_periods=None):
+    '''在 fuzzy annual panel 上计算 rolling gap。
+
+    计算逻辑：
+    1. 先按 topic-year 对 `weight_CN` / `weight_US` 做 rolling sum；
+    2. 再在每个年份横截面内，把 rolling 权重归一化成份额；
+    3. 最后比较 `share_CN - share_US`。
+    '''
+    if min_periods is None:
+        min_periods = window_size
+
+    tmp = annual_df.copy().sort_values(["topic", "year"]).reset_index(drop=True)
+    if tmp.empty:
+        return tmp
+
+    all_topics = sorted(tmp["topic"].unique().tolist())
+    all_years = sorted(tmp["year"].unique().tolist())
+    full_idx = pd.MultiIndex.from_product([all_topics, all_years], names=["topic", "year"])
+    tmp = (
+        tmp.set_index(["topic", "year"])
+        .reindex(full_idx, fill_value=0.0)
+        .reset_index()
+        .sort_values(["topic", "year"])
+    )
+
+    for country in ["CN", "US"]:
+        tmp[f"window_weight_{country}"] = (
+            tmp.groupby("topic")[f"weight_{country}"]
+            .transform(lambda s: s.rolling(window=window_size, min_periods=min_periods).sum())
+        )
+
+    tmp = tmp.dropna(subset=["window_weight_CN", "window_weight_US"]).copy()
+    total_cn = tmp.groupby("year")["window_weight_CN"].transform("sum")
+    total_us = tmp.groupby("year")["window_weight_US"].transform("sum")
+
+    tmp["share_CN"] = tmp["window_weight_CN"] / total_cn.replace(0, np.nan)
+    tmp["share_US"] = tmp["window_weight_US"] / total_us.replace(0, np.nan)
+    tmp["share_CN"] = tmp["share_CN"].fillna(0.0)
+    tmp["share_US"] = tmp["share_US"].fillna(0.0)
+    tmp["delta"] = tmp["share_CN"] - tmp["share_US"]
+    tmp["abs_delta"] = tmp["delta"].abs()
+
+    return tmp[[
+        "topic", "year", "window_weight_CN", "window_weight_US",
+        "share_CN", "share_US", "delta", "abs_delta"
+    ]].reset_index(drop=True)
+
+
+def build_fuzzy_cumulative_gap(panel_df, topic_name_map, start_year=1990):
+    '''在 fuzzy rolling panel 上复用累计差距逻辑。'''
+    return build_cumulative_gap(panel_df, topic_name_map=topic_name_map, start_year=start_year)
+
+
+def run_fuzzy_gap_suite(
+    df_in,
+    level_name,
+    membership_level,
+    topic_name_map,
+    start_year=1990,
+    rolling_window=3,
+    rolling_min_periods=None,
+    topk_vis=30,
+    trend_min_years=6,
+    trend_eps=1e-4,
+):
+    '''对指定层级运行 fuzzy weighted annual / rolling / cumulative gap。
+
+    这个函数是时间演化部分的主版本：
+    - annual：看每年主题份额差
+    - rolling：看平滑后的中短期差距
+    - cumulative：看长期累计领先/滞后
+    '''
+    rolling_min_periods = rolling_window if rolling_min_periods is None else rolling_min_periods
+
+    level_time_dir = TIME_DIR / f"level_{level_name.lower()}"
+    level_fig_dir = FIGS_DIR / f"level_{level_name.lower()}"
+    level_time_dir.mkdir(parents=True, exist_ok=True)
+    level_fig_dir.mkdir(parents=True, exist_ok=True)
+
+    annual_df = build_fuzzy_topic_time_series(df_in, membership_level=membership_level)
+    annual_df = annual_df[annual_df["year"] >= start_year].copy()
+    annual_df["topic_name"] = annual_df["topic"].map(topic_name_map)
+    annual_trend_summary = classify_gap_trends(
+        annual_df,
+        topic_name_map=topic_name_map,
+        value_col="delta",
+        min_years=trend_min_years,
+        eps=trend_eps,
+        slope_col="slope_delta",
+        start_col="delta_start",
+        end_col="delta_end",
+    )
+
+    rolling_df = build_fuzzy_windowed_share_gap(
+        annual_df,
+        window_size=rolling_window,
+        min_periods=rolling_min_periods,
+    )
+    rolling_df = rolling_df[rolling_df["year"] >= start_year].copy()
+    rolling_df["topic_name"] = rolling_df["topic"].map(topic_name_map)
+    rolling_trend_summary = classify_gap_trends(
+        rolling_df,
+        topic_name_map=topic_name_map,
+        value_col="delta",
+        min_years=trend_min_years,
+        eps=trend_eps,
+        slope_col="slope_delta",
+        start_col="delta_start",
+        end_col="delta_end",
+    )
+
+    cumulative_df = build_fuzzy_cumulative_gap(
+        rolling_df,
+        topic_name_map=topic_name_map,
+        start_year=start_year,
+    )
+    cumulative_trend_summary = classify_gap_trends(
+        cumulative_df,
+        topic_name_map=topic_name_map,
+        value_col="cum_delta",
+        min_years=trend_min_years,
+        eps=trend_eps,
+        slope_col="slope_cum_delta",
+        start_col="cum_start",
+        end_col="cum_end",
+    )
+
+    annual_df.to_csv(level_time_dir / "topic_share_yearly.csv", index=False)
+    annual_trend_summary.to_csv(level_time_dir / "topic_trend_summary_yearly.csv", index=False)
+    rolling_df.to_csv(level_time_dir / f"topic_share_gap_roll{rolling_window}.csv", index=False)
+    rolling_trend_summary.to_csv(level_time_dir / f"topic_trend_summary_roll{rolling_window}.csv", index=False)
+    cumulative_df.to_csv(level_time_dir / f"topic_cumulative_gap_from_{start_year}.csv", index=False)
+    cumulative_trend_summary.to_csv(level_time_dir / f"topic_cumulative_trend_summary_from_{start_year}.csv", index=False)
+
+    annual_latest_summary = export_latest_gap_summary(
+        annual_df,
+        topic_name_map=topic_name_map,
+        rank_col="abs_delta",
+        value_cols=["weight_CN", "weight_US", "share_CN", "share_US", "delta", "abs_delta"],
+        topn=20,
+    )
+    rolling_latest_summary = export_latest_gap_summary(
+        rolling_df,
+        topic_name_map=topic_name_map,
+        rank_col="abs_delta",
+        value_cols=["share_CN", "share_US", "delta", "abs_delta", "window_weight_CN", "window_weight_US"],
+        topn=20,
+    )
+    cumulative_latest_summary = export_latest_gap_summary(
+        cumulative_df,
+        topic_name_map=topic_name_map,
+        rank_col="cum_abs_delta",
+        value_cols=["share_CN", "share_US", "delta", "cum_delta", "cum_abs_delta"],
+        topn=20,
+    )
+
+    annual_latest_summary.to_csv(level_time_dir / "summary_latest_gap_topics_yearly.csv", index=False)
+    rolling_latest_summary.to_csv(level_time_dir / f"summary_latest_gap_topics_roll{rolling_window}.csv", index=False)
+    cumulative_latest_summary.to_csv(level_time_dir / f"summary_latest_cumulative_gap_topics_from_{start_year}.csv", index=False)
+
+    title_prefix = f"{level_name} Fuzzy Weighted"
+    if level_name == "L0":
+        figure_paths = {
+            "annual_heatmap": plot_gap_heatmap(
+                annual_df,
+                topic_name_map=topic_name_map,
+                value_col="delta",
+                rank_col="abs_delta",
+                topk=topk_vis,
+                title=f"{title_prefix} Topic-Year Share Gap Heatmap (Annual, CN − US)",
+                colorbar_label="Δ share = share_CN − share_US",
+                out_path=level_fig_dir / "annual_gap_heatmap.png",
+            ),
+            "annual_bar_latest": plot_gap_bar(
+                annual_df,
+                topic_name_map=topic_name_map,
+                year=int(annual_df["year"].max()) if not annual_df.empty else None,
+                topk=min(20, topk_vis),
+                title=f"{title_prefix} Latest Annual Topic Gap",
+                out_path=level_fig_dir / "annual_gap_bar_latest.png",
+                figsize=(12, max(6, min(20, topk_vis) * 0.38)),
+            ),
+            "rolling_heatmap": plot_gap_heatmap(
+                rolling_df,
+                topic_name_map=topic_name_map,
+                value_col="delta",
+                rank_col="abs_delta",
+                topk=topk_vis,
+                title=f"{title_prefix} Topic-Year Share Gap Heatmap (Rolling {rolling_window}Y, CN − US)",
+                colorbar_label="Δ share = share_CN − share_US",
+                out_path=level_fig_dir / f"rolling_gap_heatmap_roll{rolling_window}.png",
+            ),
+            "rolling_overview": plot_gap_overview(
+                rolling_df,
+                topic_name_map=topic_name_map,
+                value_col="delta",
+                rank_col="abs_delta",
+                topk=topk_vis,
+                title=f"{title_prefix} Rolling {rolling_window}Y Gap Overview",
+                ylabel="Δ share (CN − US)",
+                out_path=level_fig_dir / f"rolling_gap_overview_top_{topk_vis}.png",
+            ),
+            "cumulative_heatmap": plot_gap_heatmap(
+                cumulative_df,
+                topic_name_map=topic_name_map,
+                value_col="cum_delta",
+                rank_col="cum_abs_delta",
+                topk=topk_vis,
+                title=f"{title_prefix} Topic-Year Cumulative Gap Heatmap (since {start_year})",
+                colorbar_label="Cumulative Δ share",
+                out_path=level_fig_dir / f"cumulative_gap_heatmap_from_{start_year}.png",
+            ),
+            "cumulative_overview": plot_gap_overview(
+                cumulative_df,
+                topic_name_map=topic_name_map,
+                value_col="cum_delta",
+                rank_col="cum_abs_delta",
+                topk=topk_vis,
+                title=f"{title_prefix} Cumulative Gap Overview (since {start_year})",
+                ylabel=f"Cumulative Δ share since {start_year}",
+                out_path=level_fig_dir / f"cumulative_gap_overview_top_{topk_vis}.png",
+            ),
+        }
+    else:
+        figure_paths = {
+            "annual_topic_series": export_topic_gap_timeseries_batch(
+                panel_df=annual_df,
+                trend_summary_df=annual_trend_summary,
+                topic_name_map=topic_name_map,
+                out_dir=level_fig_dir / "annual_gap_by_topic",
+                value_col="delta",
+                title_prefix=f"{title_prefix} Annual Delta",
+                ylabel="Δ share (CN − US)",
+                filename_prefix="annual_gap",
+                show=False,
+            ),
+            "rolling_topic_series": export_topic_gap_timeseries_batch(
+                panel_df=rolling_df,
+                trend_summary_df=rolling_trend_summary,
+                topic_name_map=topic_name_map,
+                out_dir=level_fig_dir / f"rolling_gap_by_topic_roll{rolling_window}",
+                value_col="delta",
+                title_prefix=f"{title_prefix} Rolling {rolling_window}Y Delta",
+                ylabel="Δ share (CN − US)",
+                filename_prefix=f"rolling_gap_roll{rolling_window}",
+                show=False,
+            ),
+            "cumulative_topic_series": export_topic_gap_timeseries_batch(
+                panel_df=cumulative_df,
+                trend_summary_df=cumulative_trend_summary,
+                topic_name_map=topic_name_map,
+                out_dir=level_fig_dir / f"cumulative_gap_by_topic_from_{start_year}",
+                value_col="cum_delta",
+                title_prefix=f"{title_prefix} Cumulative Delta",
+                ylabel=f"Cumulative Δ share (CN − US)",
+                filename_prefix=f"cumulative_gap_from_{start_year}",
+                show=False,
+            ),
+        }
+
+    return {
+        "mode": "fuzzy_weighted",
+        "level": level_name,
+        "topic_name_map": topic_name_map,
+        "annual": annual_df,
+        "annual_trend_summary": annual_trend_summary,
+        "rolling": rolling_df,
+        "rolling_trend_summary": rolling_trend_summary,
+        "cumulative": cumulative_df,
+        "cumulative_trend_summary": cumulative_trend_summary,
+        "annual_latest_summary": annual_latest_summary,
+        "rolling_latest_summary": rolling_latest_summary,
+        "cumulative_latest_summary": cumulative_latest_summary,
+        "figure_paths": figure_paths,
+        "time_dir": level_time_dir,
+        "fig_dir": level_fig_dir,
+        "n_topics": int(len(topic_name_map)),
+    }
+
+
+def build_country_multitopic_yearly_metrics(df_in, start_year=1990):
+    '''按国家、按年份汇总论文层面的多主题性指标。
+
+    指标解释：
+    - entropy 均值：论文主题分布越均匀，说明越跨主题；
+    - effective_topic_count 均值：论文“有效连接了多少主题”；
+    - top1_top2_gap 均值：越小表示主题边界越模糊、越多主题交叉。
+    '''
+    tmp = df_in[(df_in["country2"].isin(["CN", "US"])) & (df_in["year_int"] >= start_year)].copy()
+    out = (
+        tmp.groupby(["country2", "year_int"])
+        .agg(
+            n_papers=("doc_index", "size"),
+            mean_topic_entropy=("topic_entropy", "mean"),
+            mean_effective_topic_count=("effective_topic_count", "mean"),
+            mean_top1_top2_gap=("topic_top2_gap", "mean"),
+        )
+        .reset_index()
+        .rename(columns={"year_int": "year"})
+        .sort_values(["country2", "year"])
+        .reset_index(drop=True)
+    )
+    return out
+
+
+def plot_country_multitopic_yearly_metrics(yearly_df, out_dir):
+    '''把国家层面的多主题性指标画成年度折线图。'''
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    metrics = [
+        ("mean_topic_entropy", "Mean Entropy"),
+        ("mean_effective_topic_count", "Mean Effective Topic Count"),
+        ("mean_top1_top2_gap", "Mean Top1-Top2 Gap"),
+    ]
+    fig, axes = plt.subplots(1, len(metrics), figsize=(18, 4.8))
+    colors = {"CN": "#E03C31", "US": "#3C6FE0"}
+
+    for ax, (metric, title) in zip(axes, metrics):
+        for country in ["CN", "US"]:
+            sub = yearly_df[yearly_df["country2"] == country]
+            if sub.empty:
+                continue
+            ax.plot(sub["year"], sub[metric], marker="o", linewidth=1.8, label=country, color=colors[country])
+        ax.set_title(title)
+        ax.set_xlabel("Year")
+        ax.grid(True, alpha=0.25)
+    axes[0].legend()
+    plt.tight_layout()
+    out_path = out_dir / "country_multitopic_yearly_metrics.png"
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+    return out_path
+
+
+def build_topic_boundary_metrics(df_in, membership_level, topic_name_map):
+    '''衡量每个 topic 是否更像“交叉枢纽主题”。
+
+    核心思想：
+    - 若某个 topic 吸收进来的论文本身 entropy 很高，
+      那么这个 topic 往往不是一个高度封闭的单一主题，而更像交叉汇聚点。
+    - 因此这里用 membership 作为权重，对论文层面的 entropy / effective_topic_count / gap 做加权平均。
+    '''
+    tmp = df_in[["doc_index", "topic_entropy", "effective_topic_count", "topic_top2_gap"]].copy()
+    tmp["doc_index"] = tmp["doc_index"].astype(int)
+    idx = tmp["doc_index"].values
+    mem = safe_row_normalize(membership_level)[idx]
+
+    rows = []
+    for topic_id in range(mem.shape[1]):
+        topic_weight = mem[:, topic_id]
+        denom = float(topic_weight.sum())
+        if denom <= 0:
+            continue
+        rows.append({
+            "topic": int(topic_id),
+            "topic_name": topic_name_map.get(int(topic_id), f"topic_{int(topic_id)}"),
+            "topic_weight_total": denom,
+            "boundary_entropy_mean": float(np.average(tmp["topic_entropy"], weights=topic_weight)),
+            "boundary_effective_topic_count_mean": float(np.average(tmp["effective_topic_count"], weights=topic_weight)),
+            "boundary_top1_top2_gap_mean": float(np.average(tmp["topic_top2_gap"], weights=topic_weight)),
+        })
+    return pd.DataFrame(rows).sort_values(
+        ["boundary_entropy_mean", "boundary_effective_topic_count_mean"],
+        ascending=[False, False],
+    ).reset_index(drop=True)
+
+
+def build_topic_country_cross_metrics(df_in, membership_level, topic_name_map):
+    '''比较同一 topic 内部，CN 与 US 的论文谁更专门化、谁更交叉融合。
+
+    对每个 topic、每个国家，使用该国家论文投向该 topic 的 membership 作为权重，
+    再去加权论文层面的 entropy / effective_topic_count / top1-top2 gap。
+    额外加入 `other_topic_share_mean`，表示“进入该 topic 的论文仍有多少权重投向了其他主题”。
+    '''
+    tmp = df_in[["doc_index", "country2", "topic_entropy", "effective_topic_count", "topic_top2_gap"]].copy()
+    tmp["doc_index"] = tmp["doc_index"].astype(int)
+    idx = tmp["doc_index"].values
+    mem = safe_row_normalize(membership_level)[idx]
+
+    rows = []
+    for topic_id in range(mem.shape[1]):
+        topic_weight_all = mem[:, topic_id]
+        for country in ["CN", "US"]:
+            mask = (tmp["country2"].values == country)
+            if not mask.any():
+                continue
+            w = topic_weight_all[mask]
+            denom = float(w.sum())
+            if denom <= 0:
+                continue
+            rows.append({
+                "topic": int(topic_id),
+                "topic_name": topic_name_map.get(int(topic_id), f"topic_{int(topic_id)}"),
+                "country2": country,
+                "topic_weight_total": denom,
+                "entropy_mean": float(np.average(tmp.loc[mask, "topic_entropy"], weights=w)),
+                "effective_topic_count_mean": float(np.average(tmp.loc[mask, "effective_topic_count"], weights=w)),
+                "top1_top2_gap_mean": float(np.average(tmp.loc[mask, "topic_top2_gap"], weights=w)),
+                "other_topic_share_mean": float(np.average(1.0 - mem[mask, topic_id], weights=w)),
+            })
+
+    panel_df = pd.DataFrame(rows)
+    diff_df = (
+        panel_df.pivot_table(index=["topic", "topic_name"], columns="country2",
+                             values=["entropy_mean", "effective_topic_count_mean", "top1_top2_gap_mean", "other_topic_share_mean"])
+        .reset_index()
+    )
+    diff_df.columns = [
+        "_".join([str(x) for x in col if str(x) != ""]).strip("_")
+        if isinstance(col, tuple) else str(col)
+        for col in diff_df.columns
+    ]
+    for metric in ["entropy_mean", "effective_topic_count_mean", "top1_top2_gap_mean", "other_topic_share_mean"]:
+        cn_col = f"{metric}_CN"
+        us_col = f"{metric}_US"
+        if cn_col in diff_df.columns and us_col in diff_df.columns:
+            diff_df[f"{metric}_CN_minus_US"] = diff_df[cn_col] - diff_df[us_col]
+
+    diff_df = diff_df.sort_values("entropy_mean_CN_minus_US", ascending=False).reset_index(drop=True)
+    return panel_df, diff_df
+
+
+def plot_topic_boundary_metrics(boundary_df, out_dir, topk=15):
+    '''绘制 topic 边界性排名图。'''
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plot_df = boundary_df.head(min(topk, len(boundary_df))).iloc[::-1].copy()
+    fig, ax = plt.subplots(figsize=(11, max(6, len(plot_df) * 0.38)))
+    ax.barh(plot_df["topic_name"], plot_df["boundary_entropy_mean"], color="#E08A2E", alpha=0.85)
+    ax.set_title("Top Boundary Topics by Membership-Weighted Entropy")
+    ax.set_xlabel("Membership-weighted mean entropy")
+    ax.grid(True, axis="x", alpha=0.25)
+    plt.tight_layout()
+    out_path = out_dir / "topic_boundary_entropy_topk.png"
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+    return out_path
+
+
+def plot_topic_country_cross_metrics(diff_df, out_dir, topk=15):
+    '''绘制 CN-US 在 topic 内部交叉性的差异排名。'''
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plot_df = diff_df.nlargest(min(topk, len(diff_df)), "entropy_mean_CN_minus_US").iloc[::-1].copy()
+    fig, ax = plt.subplots(figsize=(11, max(6, len(plot_df) * 0.38)))
+    ax.barh(plot_df["topic_name"], plot_df["entropy_mean_CN_minus_US"], color="#8A5BD8", alpha=0.85)
+    ax.set_title("CN - US Cross-Topicality Gap within Topic")
+    ax.set_xlabel("Entropy mean difference (CN - US)")
+    ax.grid(True, axis="x", alpha=0.25)
+    plt.tight_layout()
+    out_path = out_dir / "topic_country_entropy_gap_topk.png"
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+    return out_path

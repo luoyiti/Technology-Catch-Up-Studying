@@ -1,0 +1,8 @@
+topic_info_df = extract_top_words_per_topic(
+    topic_docs_df=topic_docs_df,
+    c_tf_idf_matrix=c_tf_idf_matrix,
+    words=words,
+    top_n=10
+)
+
+topic_info_df.head(10)

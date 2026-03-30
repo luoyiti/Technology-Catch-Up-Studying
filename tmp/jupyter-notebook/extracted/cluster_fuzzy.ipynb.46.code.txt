@@ -1,0 +1,120 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell T3 — Cross-Level Gap Comparison Summary
+# ══════════════════════════════════════════════════════════════════════════════
+def summarize_gap_levels(gap_results_by_level, topk=10):
+    '''汇总比较不同层级下的中美技术差距强度。'''
+    rows = []
+    for level_name, result in gap_results_by_level.items():
+        rolling_df = result["rolling"].copy()
+        cumulative_df = result["cumulative"].copy()
+        latest_year = int(rolling_df["year"].max()) if not rolling_df.empty else np.nan
+        latest_df = rolling_df[rolling_df["year"] == latest_year].copy() if pd.notna(latest_year) else rolling_df.head(0)
+
+        topic_gap_mean = (
+            rolling_df.groupby("topic")["abs_delta"].mean().sort_values(ascending=False)
+            if not rolling_df.empty else pd.Series(dtype=float)
+        )
+        topk_mean_abs_gap = float(topic_gap_mean.head(min(topk, len(topic_gap_mean))).mean()) if len(topic_gap_mean) else np.nan
+
+        rows.append({
+            "level": level_name,
+            "n_topics": int(result["n_topics"]),
+            "rolling_mean_abs_gap": float(rolling_df["abs_delta"].mean()) if not rolling_df.empty else np.nan,
+            "rolling_max_abs_gap": float(rolling_df["abs_delta"].max()) if not rolling_df.empty else np.nan,
+            "rolling_topk_mean_abs_gap": topk_mean_abs_gap,
+            "latest_year": int(latest_year) if pd.notna(latest_year) else np.nan,
+            "latest_mean_abs_gap": float(latest_df["abs_delta"].mean()) if not latest_df.empty else np.nan,
+            "latest_max_abs_gap": float(latest_df["abs_delta"].max()) if not latest_df.empty else np.nan,
+            "cumulative_max_abs_gap": float(cumulative_df["cum_abs_delta"].max()) if not cumulative_df.empty else np.nan,
+        })
+
+    out = pd.DataFrame(rows)
+    level_order = {f"L{i}": i for i in range(10)}
+    out["level_order"] = out["level"].map(level_order)
+    out = out.sort_values("level_order").drop(columns="level_order").reset_index(drop=True)
+    return out
+
+
+def plot_level_comparison(level_summary_df, out_path, title_prefix=""):
+    '''绘制不同层级技术差距比较图。'''
+    metrics = [
+        ("n_topics", "# Topics"),
+        ("rolling_mean_abs_gap", "Mean |Gap|"),
+        ("rolling_max_abs_gap", "Max |Gap|"),
+        ("rolling_topk_mean_abs_gap", f"Top-{LEVEL_COMPARISON_TOPK} Mean |Gap|"),
+    ]
+
+    fig, axes = plt.subplots(1, len(metrics), figsize=(18, 4.8))
+    for ax, (metric, title) in zip(axes, metrics):
+        ax.bar(level_summary_df["level"], level_summary_df[metric], color="#3C6FE0", alpha=0.85)
+        ax.set_title(f"{title_prefix}{title}")
+        ax.set_xlabel("Level")
+        ax.grid(True, axis="y", alpha=0.25)
+        for row in level_summary_df.itertuples(index=False):
+            value = getattr(row, metric)
+            if pd.notna(value):
+                label = f"{int(value)}" if metric == "n_topics" else f"{value:.3g}"
+                ax.text(row.level, value, label, ha="center", va="bottom", fontsize=8)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+    print(f"✅ 已保存跨层级比较图: {out_path}")
+
+
+level_gap_comparison_hard_df = summarize_gap_levels(
+    gap_results_by_level=gap_results_by_level_hard,
+    topk=LEVEL_COMPARISON_TOPK,
+)
+level_gap_comparison_fuzzy_df = summarize_gap_levels(
+    gap_results_by_level=gap_results_by_level_fuzzy,
+    topk=LEVEL_COMPARISON_TOPK,
+)
+
+level_gap_comparison_hard_df.to_csv(TIME_ROOT / "hier_level_gap_comparison_hard.csv", index=False)
+level_gap_comparison_fuzzy_df.to_csv(TIME_ROOT / "hier_level_gap_comparison_fuzzy.csv", index=False)
+
+plot_level_comparison(
+    level_gap_comparison_hard_df,
+    out_path=TIME_ROOT / "hier_level_gap_comparison_hard.png",
+    title_prefix="Hard Anchor Baseline ",
+)
+plot_level_comparison(
+    level_gap_comparison_fuzzy_df,
+    out_path=TIME_ROOT / "hier_level_gap_comparison_fuzzy.png",
+    title_prefix="Fuzzy Weighted Main ",
+)
+
+comparison_merge_df = level_gap_comparison_hard_df.merge(
+    level_gap_comparison_fuzzy_df,
+    on="level",
+    how="outer",
+    suffixes=("_hard", "_fuzzy"),
+)
+comparison_merge_df.to_csv(TIME_ROOT / "hier_level_gap_comparison_hard_vs_fuzzy.csv", index=False)
+
+fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
+compare_metrics = [
+    ("rolling_mean_abs_gap", "Mean |Gap|"),
+    ("rolling_max_abs_gap", "Max |Gap|"),
+    ("cumulative_max_abs_gap", "Max Cumulative |Gap|"),
+]
+x = np.arange(len(comparison_merge_df))
+width = 0.36
+for ax, (metric, title) in zip(axes, compare_metrics):
+    ax.bar(x - width / 2, comparison_merge_df[f"{metric}_hard"], width=width, label="Hard Anchor", color="#3C6FE0", alpha=0.82)
+    ax.bar(x + width / 2, comparison_merge_df[f"{metric}_fuzzy"], width=width, label="Fuzzy Weighted", color="#E03C31", alpha=0.82)
+    ax.set_xticks(x)
+    ax.set_xticklabels(comparison_merge_df["level"])
+    ax.set_title(title)
+    ax.grid(True, axis="y", alpha=0.25)
+axes[0].legend()
+plt.tight_layout()
+plt.savefig(TIME_ROOT / "hier_level_gap_comparison_hard_vs_fuzzy.png", dpi=220, bbox_inches="tight")
+plt.show()
+plt.close(fig)
+
+print()
+print("✅ Hard / Fuzzy 跨层级比较汇总表")
+display(level_gap_comparison_hard_df)
+display(level_gap_comparison_fuzzy_df)

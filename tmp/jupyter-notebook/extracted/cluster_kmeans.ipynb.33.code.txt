@@ -1,0 +1,18 @@
+def extract_top_words_per_topic(topic_docs_df, c_tf_idf_matrix, words, top_n=10):
+    rows = []
+
+    for row_idx, topic_id in enumerate(topic_docs_df["topic"].tolist()):
+        scores = c_tf_idf_matrix[row_idx]
+        top_idx = np.argsort(scores)[::-1][:top_n]
+
+        top_words = words[top_idx]
+        top_scores = scores[top_idx]
+
+        rows.append({
+            "topic": int(topic_id),
+            "top_words": list(top_words),
+            "top_scores": list(map(float, top_scores)),
+            "name": "_".join(top_words[:4]) if len(top_words) > 0 else f"topic_{topic_id}"
+        })
+
+    return pd.DataFrame(rows)
