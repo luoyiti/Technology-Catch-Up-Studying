@@ -8,20 +8,25 @@ wheels/
 
 # Virtual environments
 .venv
+.venv-1
 
 # Generated outputs
 output/
+output*/
 
-# Local large datasets
-data/dataCleanSCIE.csv
-<<<<<<< HEAD
-
-backup/
-
+# Large data directories
 data/
+backup/
+tmp/
 
-cluster/outputs_manual_topic_model/modular_pipeline/specter2_proximity/shared/clean_dataset.csv
-=======
->>>>>>> parent of 6611ea4 (Add topic pipeline common utilities and KMeans clustering notebook)
-outputs_manual_topic_model/modular_pipeline/specter2_proximity/shared/clean_dataset.csv
-/outputs_manual_topic_model/modular_pipeline/specter2_proximity/shared
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+*.swp
+
+# Large generated files
+*.png
+*.jpg
+*.pdf
