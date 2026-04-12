@@ -1,0 +1,140 @@
+{
+  "reproducibility": {
+    "seed": 42
+  },
+  "paths": {
+    "data_csv": "data/dataCleanSCIE.csv",
+    "output_dir": "output/cluster_results",
+    "hierarchical_subdir": "hierarchical_clustering"
+  },
+  "specter": {
+    "clustering_model": "allenai/specter2_base"
+  },
+  "specter2_keybert": {
+    "base_model": "allenai/specter2_base",
+    "adapter_model": "allenai/specter2",
+    "cache_root": ".cache/huggingface",
+    "batch_size": 16,
+    "top_n_keywords": 10
+  },
+  "minimax": {
+    "api_key_env": "MINIMAX_API_KEY",
+    "api_base": "https://api.minimaxi.com/v1",
+    "chat_endpoint": "/text/chatcompletion_v2",
+    "model": "MiniMax-M2.7-highspeed",
+    "timeout_seconds": 60,
+    "max_retries": 3,
+    "retry_sleep_seconds": 2.0,
+    "topic_summary_cache_filename": "topic_summaries_minimax.json"
+  },
+  "umap_defaults": {
+    "n_neighbors": 30,
+    "n_components": 10,
+    "min_dist": 0.1,
+    "metric": "cosine"
+  },
+  "agglomerative_defaults": {
+    "n_clusters": 60,
+    "linkage": "average",
+    "metric": "cosine"
+  },
+  "agglo_search": {
+    "subset_n": 12000,
+    "topk_full": 5,
+    "max_eval_points": 5000,
+    "linkage_metric_coarse": [
+      ["average", "cosine"],
+      ["complete", "cosine"],
+      ["ward", "euclidean"]
+    ],
+    "linkage_metric_full": [
+      ["average", "cosine"],
+      ["average", "euclidean"],
+      ["complete", "cosine"],
+      ["complete", "euclidean"],
+      ["ward", "euclidean"]
+    ]
+  },
+  "vectorizer": {
+    "ngram_range": [1, 2],
+    "max_features": 20000,
+    "extra_stopword_groups": {
+      "academic": [
+        "study",
+        "studies",
+        "paper",
+        "article",
+        "result",
+        "results",
+        "method",
+        "methods",
+        "approach",
+        "approaches",
+        "analysis",
+        "research",
+        "investigation",
+        "based",
+        "using",
+        "use",
+        "used",
+        "proposed",
+        "new",
+        "effect",
+        "effects",
+        "performance",
+        "evaluation",
+        "model",
+        "models",
+        "data"
+      ],
+      "nuclear_background": ["nuclear", "power", "energy"],
+      "noise": [
+        "et",
+        "al",
+        "fig",
+        "figure",
+        "table",
+        "elsevier",
+        "springer",
+        "wiley",
+        "copyright"
+      ]
+    }
+  },
+  "embedding": {
+    "batch_size": 64
+  },
+  "visualization": {
+    "top_k_topics": 20
+  },
+  "umap_search": {
+    "n_neighbors_grid": [15, 30, 50],
+    "n_components_grid": [5, 10],
+    "min_dist_grid": [0.0, 0.1]
+  },
+  "output_policy": {
+    "clear_notebook_outputs": true,
+    "default_png_dpi": 150,
+    "export_interactive_html": true
+  },
+  "capability_gap": {
+    "window_years": 5,
+    "exclude_recent_years": 1,
+    "min_bucket_size": 20,
+    "min_frontier_us": 20,
+    "topk_report": 20
+  },
+  "time_evolution": {
+    "rolling_window_size": 5,
+    "rolling_min_periods": 3,
+    "min_year": 1900,
+    "max_year": 2100
+  },
+  "robustness": {
+    "run_seed_repeat": false,
+    "run_grid": false,
+    "run_bootstrap": false,
+    "bootstrap_iterations": 200,
+    "bootstrap_seed": 2026
+  }
+}

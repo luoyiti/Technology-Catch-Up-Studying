@@ -22,6 +22,9 @@ tmp/
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
+# HuggingFace cache (project-local)
+.cache/
+
 # OS files
 .DS_Store
 *.swp

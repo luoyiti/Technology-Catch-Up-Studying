@@ -5,7 +5,23 @@
       "Bash(git rm:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(uv run:*)",
+      "Bash(xxd)",
+      "Bash(python3 -X utf8 -c \"import ast; ast.parse\\(open\\('/Users/luoyiti/Project/catch-up/scripts/build_country_topic_catchup_decomposed_nb.py'\\).read\\(\\)\\)\")",
+      "Bash(python3:*)",
+      "Bash(ls .venv/bin/python*)",
+      "Bash(jupyter nbconvert:*)",
+      "Bash(uv add:*)",
+      "Bash(.venv/bin/python -c \"import tslearn; print\\('tslearn OK'\\)\")",
+      "Bash(.venv/bin/python -c \"from tslearn.metrics import cdist_dtw; print\\('cdist_dtw OK'\\)\")",
+      "Bash(.venv/bin/python -m ipykernel install --user --name=catchup-venv --display-name='catch-up \\(uv venv\\)')",
+      "Bash(jupyter kernelspec:*)",
+      "Bash(.venv/bin/python -c \"import tslearn; print\\('tslearn in .venv'\\)\")",
+      "Read(//Users/luoyiti/Library/Jupyter/kernels/catchup-catch-up/**)",
+      "Read(//Users/luoyiti/Library/Jupyter/kernels/catchup-venv/**)",
+      "Bash(python:*)",
+      "Bash(ls -la /Users/luoyiti/Project/catch-up/output/time_series_hierarchical/trajectory_*decomposed*.csv /Users/luoyiti/Project/catch-up/output/time_series_hierarchical/trajectory_*decomposed*.png)"
     ]
   }
 }
