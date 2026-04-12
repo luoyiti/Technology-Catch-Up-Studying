@@ -1,4 +1,0 @@
-\beamer@sectionintoc {1}{研究背景与意义}{3}{0}{1}
-\beamer@sectionintoc {2}{研究设计}{4}{0}{2}
-\beamer@sectionintoc {3}{阶段性结果}{6}{0}{3}
-\beamer@sectionintoc {4}{结论与下一阶段目标}{16}{0}{4}
